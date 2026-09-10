@@ -47,7 +47,7 @@ host=127.0.0.1
 user=nakon
 password=your-db-password
 database=vulndb
-VULNDB_UI_URL=http://10.0.0.118:3000
+VULNDB_UI_URL=http://10.0.0.119:3000
 ```
 
 `config.json` lists the target machines (gitignored — live credentials and IPs). See
