@@ -236,7 +236,12 @@ def cmd_show(args) -> int:
         ]
         print(f"  {short(plan_id)}  {plan['platform']}  {len(plan['steps'])} step(s)  "
               f"{plan['tarball_bytes']} bytes")
-        print(f"    machines: {', '.join(machines) or '(none in this bundle\'s inventory)'}")
+        # NOTE: no backslash inside an f-string expression -- that is only
+        # legal from Python 3.12 (PEP 701) and this package supports >=3.9;
+        # an escaped quote here was a SyntaxError on 3.9-3.11 (cli import
+        # died before argparse ran, breaking EVERY command, not just `plans`).
+        _no_inv = "(none in this bundle's inventory)"
+        print(f"    machines: {', '.join(machines) or _no_inv}")
         for step in plan["steps"]:
             if step["kind"] == "package":
                 print(f"    {step['index']:>3}  package  {step['package']}")
