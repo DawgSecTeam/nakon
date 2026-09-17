@@ -4,6 +4,26 @@ All notable changes to nakon are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] — 2026-09-17
+
+### Security
+- `render_run_sh`/`render_run_ps1` interpolated a step's raw catalog config name into the
+  `##nakon begin` marker line inside a double-quoted `echo`/`Write-Output` string. Catalog
+  names have no charset restriction, so a name containing `$(...)` (bash) or `$(...)`
+  (PowerShell) executed as a subexpression in the elevated deploy context. The line below it
+  already passed the same name through `shlex.quote()`/`ps_quote()` correctly — the marker
+  line now does too.
+
+### Fixed
+- `render_run_sh`'s live `##nakon rc` marker was space-delimited while `deploy/report.py`
+  parses it tab-delimited (matching the PowerShell driver, which already emitted it correctly).
+  Only visible on the mid-deploy failure fallback path (SSH channel dies before the final
+  `report.tsv` dump), where Linux per-step rc/seconds silently never populated.
+
+### Documented
+- `AGENTS.md`'s `build --json` integration contract example named a `built` key that
+  `build/builder.py` never emits; corrected to the real key, `cached`.
+
 ## [0.1.3] — 2026-08-15
 
 ### Fixed

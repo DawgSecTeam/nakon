@@ -115,7 +115,11 @@ FAILED=0
 
 nakon_record() {{  # idx name kind rc secs
     printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$2" "$3" "$4" "$5" >> "$REPORT"
-    echo "{MARKER_RC} $1 $4 $5"
+    # Tab-delimited, matching report.tsv and powershell.py's Nakon-Record, on purpose: a
+    # plain-space-delimited line can't tell an empty field from a separator, so an unexpected
+    # blank here would silently shift $5 into the rc column on the Python side instead of
+    # being visibly wrong.
+    printf '%s %s\\t%s\\t%s\\n' "{MARKER_RC}" "$1" "$4" "$5"
     [ "$4" -eq 0 ] || FAILED=$((FAILED + 1))
 }}
 
@@ -225,7 +229,7 @@ def render_run_sh(steps: list, plan_id: str, bundle_id: str, version: str) -> st
 
         parts.append(f"""
 # ── step {idx} — {kind}: {label} (run_as={run_as}) {'─' * max(0, 30 - len(label))}
-echo "{MARKER_BEGIN} {idx} {kind} {label}"
+printf '%s %s %s %s\\n' "{MARKER_BEGIN}" "{idx}" "{kind}" {shlex.quote(label)}
 _nakon_t0=$SECONDS
 {runner}
 nakon_record {idx} {shlex.quote(label)} {kind} $? $((SECONDS - _nakon_t0))

@@ -229,7 +229,7 @@ def render_run_ps1(steps: list, plan_id: str, bundle_id: str, version: str) -> s
 
         parts.append(f"""
 # -- step {idx} -- {kind}: {label}
-Write-Output "{MARKER_BEGIN} {idx} {kind} {label}"
+Write-Output ("{MARKER_BEGIN} {idx} {kind} {{0}}" -f {ps_quote(label)})
 Nakon-Step {script} {workdir} '{idx}' {ps_quote(label)} '{kind}'
 """)
 

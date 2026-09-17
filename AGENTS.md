@@ -102,7 +102,7 @@ Invoke as a subprocess; do not import internals.
 ```bash
 # Build a bundle (run where the vulndb is reachable; cwd must let nakon read its .env)
 python3 -m nakon build --config <abs-path>/config.json --out bundles --json
-# last stdout line = {"bundle_id","path","built":bool,...}
+# last stdout line = {"bundle_id","path","cached":bool,"plans","machines"}
 
 # Deploy (run where the boxes are reachable)
 python3 -m nakon deploy --bundle bundles/<id> --config <abs-path>/config.json --json

@@ -13,7 +13,7 @@ That split is the point. A saved bundle deploys byte-identical scripts and media
 much the catalog has moved on since, and the deploy host never holds vulndb credentials.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.5"
 
 # Public API for callers embedding nakon rather than shelling out to it.
 #
