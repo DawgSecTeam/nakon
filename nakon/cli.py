@@ -432,12 +432,17 @@ def cmd_catalog_show(args) -> int:
 
 def cmd_catalog_check(args) -> int:
     _load_env()
-    from .catalog.query import boxes_from_config, boxes_from_pins, check_selection, open_source
+    from .catalog.query import (boxes_from_config, boxes_from_pins, check_selection,
+                            open_source, platforms_from_boxes_json)
 
     if args.config:
         boxes = boxes_from_config(args.config)
     elif args.box_vulns:
-        boxes = boxes_from_pins(args.box_vulns, args.box_services, args.platform)
+        platforms = None
+        if args.boxes_json:
+            platforms = platforms_from_boxes_json(args.boxes_json)
+        boxes = boxes_from_pins(args.box_vulns, args.box_services, args.platform,
+                                platforms=platforms)
     elif args.select:
         names = [n for chunk in args.select for n in chunk.split(",") if n.strip()]
         boxes = [{"name": "<selection>", "platform": args.platform, "configurations": names}]
@@ -585,6 +590,9 @@ def build_parser() -> argparse.ArgumentParser:
                              help="check every machine in a nakon config.json")
     p_cat_check.add_argument("--box-vulns", metavar="FILE",
                              help="check a tezcatlipoca box_vulns.json")
+    p_cat_check.add_argument("--boxes-json", metavar="FILE",
+                             help="tezcatlipoca boxes.json: per-box platform is derived from each "
+                                  "template name (contains 'win' = windows), overriding --platform")
     p_cat_check.add_argument("--box-services", metavar="FILE",
                              help="the matching box_services.json, checked alongside it")
     p_cat_check.add_argument("--platform", default="linux", choices=("linux", "windows"),

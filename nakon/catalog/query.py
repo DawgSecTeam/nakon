@@ -272,12 +272,16 @@ def boxes_from_config(config_path) -> list:
     ]
 
 
-def boxes_from_pins(vulns_path, services_path=None, platform="linux") -> list:
+def boxes_from_pins(vulns_path, services_path=None, platform="linux",
+                    platforms: dict | None = None) -> list:
     """tezcatlipoca's box_vulns.json (+ optional box_services.json), as check_selection boxes.
 
     Both files are {box_name: [configuration_name, ...]} keyed by box *type*, not per team.
     Services are checked alongside vulns because the two are concatenated into one request when
     the competition is generated, and a conflict only shows up in the combined list.
+
+    `platforms` optionally maps box name -> "linux"|"windows", overriding `platform` per box
+    (mixed-platform competitions otherwise need one check run per platform).
     """
     def _read(path):
         if path is None:
@@ -291,12 +295,31 @@ def boxes_from_pins(vulns_path, services_path=None, platform="linux") -> list:
 
     vulns = _read(vulns_path)
     services = _read(services_path)
+    platforms = platforms or {}
 
     boxes = []
     for name in sorted(set(vulns) | set(services)):
         boxes.append({
             "name": name,
-            "platform": platform,
+            "platform": platforms.get(name, platform),
             "configurations": list(services.get(name, [])) + list(vulns.get(name, [])),
         })
     return boxes
+
+
+def platforms_from_boxes_json(boxes_path) -> dict:
+    """{box_name: platform} from tezcatlipoca's boxes.json, by template name.
+
+    Mirrors tezcatlipoca's own rule (is_windows_template): a template whose name contains
+    "win" (case-insensitive) is a Windows box; everything else is linux.
+    """
+    try:
+        boxes = json.loads(Path(boxes_path).read_text())
+    except FileNotFoundError as exc:
+        raise NakonError(f"no such file: {boxes_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise NakonError(f"{boxes_path} is not valid JSON: {exc}") from exc
+    return {
+        b["name"]: ("windows" if "win" in str(b.get("template", "")).lower() else "linux")
+        for b in boxes
+    }
