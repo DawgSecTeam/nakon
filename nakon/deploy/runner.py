@@ -11,9 +11,10 @@ import os
 import tempfile
 import threading
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 
+from ..gen import MARKER_DONE
 from ..hashing import short
 from . import ssh
 from .report import RunProgress, format_duration
@@ -61,8 +62,13 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
 
     client = None
     paths = None
-    plan_dir = None
     completed = False
+    # Filled in by on_line as the bootstrap announces its unpacked plan directory. It lives out
+    # here, not inside the try, so the finally-block can still remove that directory when the
+    # channel dies or the run is interrupted. It used to be read only after run_streaming
+    # returned normally, so Ctrl-C (or a dropped connection) left the plan — the answer key —
+    # under /root: force_cleanup was called with plan_dir=None and only removed the archive.
+    state = {"in_report": False, "report": [], "plan_dir": None}
 
     try:
         plan_id, plan_entry = bundle.plan_for(machine)
@@ -97,8 +103,6 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
             os.unlink(local_bootstrap)
 
         # Report framing: everything between the markers is raw report.tsv, not output.
-        state = {"in_report": False, "report": []}
-
         def on_line(text):
             outcome.log_lines.append(text)
             stripped = text.strip()
@@ -117,6 +121,8 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
                 return
 
             if outcome.progress.feed(text):
+                if stripped.startswith(MARKER_DONE):
+                    return  # end-of-plan marker: nothing new to say (used to re-print the last step)
                 current = outcome.progress.current
                 if current is not None:
                     line(f"step {current.index}/{step_count} {current.kind}: {current.name}")
@@ -144,14 +150,17 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
             on_line=on_line,
             on_idle=on_idle,
         )
-        plan_dir = state.get("plan_dir")
 
         if state["report"]:
             outcome.progress.merge_report("\n".join(state["report"]))
         elif not outcome.progress.results():
+            hint = (
+                "the SSH user must be a local administrator (run.ps1 exits 78 otherwise)"
+                if platform == "windows"
+                else "check credentials and sudo access"
+            )
             outcome.error = (
-                f"no output from the remote plan (exit {outcome.exit_status}) — "
-                f"check credentials and sudo access"
+                f"no output from the remote plan (exit {outcome.exit_status}) — {hint}"
             )
         completed = outcome.progress.done or bool(state["report"])
 
@@ -166,11 +175,17 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
             # The bootstrap removes its own artifacts on a clean exit; this covers the case
             # where the channel died first and the plan would be left on the box.
             if not completed and not keep_remote and paths is not None:
-                ssh.force_cleanup(client, platform, paths, machine.get("password"), plan_dir)
+                ssh.force_cleanup(client, platform, paths, machine.get("password"), state["plan_dir"])
             client.close()
 
     if log_dir is not None and outcome.log_lines:
-        _write_logs(Path(log_dir), outcome)
+        # Outside the try above on purpose (the log should include the FAILED line), but a
+        # log-writing problem must not escape: under --jobs it would surface from
+        # future.result() as a traceback and abort every other machine's deploy.
+        try:
+            _write_logs(Path(log_dir), outcome)
+        except OSError as exc:
+            line(f"could not write logs under {log_dir}: {exc}")
 
     return outcome
 
@@ -198,12 +213,27 @@ def deploy(bundle, machines, keep_remote=False, jobs=1, log_dir=None, emit=print
 
     # Per-machine work is atomic now, so parallelism is just a thread pool. Output stays
     # readable because every line carries its machine's prefix and printing is locked.
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
+    pool = ThreadPoolExecutor(max_workers=jobs)
+    futures = []
+    try:
         futures = [
             pool.submit(deploy_machine, bundle, machine, keep_remote, log_dir, emit)
             for machine in machines
         ]
         return [future.result() for future in futures]
+    except KeyboardInterrupt:
+        # Machines that haven't started are cancelled. Ones already mid-run are NOT abandoned:
+        # each holds a plan directory on its box (the answer key) that only its own
+        # deploy_machine finally-block removes, so let them unwind and clean up. A second
+        # Ctrl-C stops waiting.
+        queued = sum(1 for future in futures if future.cancel())
+        running = sum(1 for future in futures if future.running())
+        emit(f"[nakon] interrupted: {queued} queued machine(s) cancelled; waiting for "
+             f"{running} in-flight machine(s) to finish and clean up (Ctrl-C again to stop waiting)")
+        wait([future for future in futures if not future.cancelled()])
+        raise
+    finally:
+        pool.shutdown(wait=False)
 
 
 def outcomes_to_dict(bundle, outcomes: list, log_dir=None) -> dict:

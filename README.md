@@ -27,6 +27,10 @@ Two properties fall out of that split:
    `nakon diff` reports the drift.
 2. **The deploy host never holds vulndb credentials.**
 
+`nakon diff` compares a bundle's recorded rows (script, `run_as`, `type`, attachments,
+`depends_on`) against the live catalog and also re-resolves every request the bundle serves, so a
+dependency added or renamed elsewhere in the graph is reported even though no recorded row changed.
+
 A bundle does **not** pin the internet — `apache`/`nginx`/`ssh`/`install-package` still call
 `apt-get install`, and `splunk` still downloads ~500 MB. Reproducible inputs, not offline install.
 
@@ -51,7 +55,10 @@ VULNDB_UI_URL=http://10.0.0.119:3000
 ```
 
 `config.json` lists the target machines (gitignored — live credentials and IPs). See
-`config-example.json`. Generate one interactively with `python3 -m nakon randomize`.
+`config-example.json`. Generate one interactively with `python3 -m nakon randomize`. Each machine
+needs `ip`, `user` and `configurations`; `password` is the SSH/sudo password, and an optional
+`identity_file` (path to a private key) is used for SSH instead when given. Malformed entries are
+rejected up front with the machine and field named, before anything is built or deployed.
 
 ## Quickstart
 
@@ -143,7 +150,7 @@ so one configuration's failure never aborts the rest of the box.
 
 | flag | effect |
 |---|---|
-| `--jobs N` | deploy N machines in parallel (default 1) |
+| `--jobs N` | deploy N machines in parallel (default 1). Ctrl-C cancels machines not yet started and waits for in-flight ones to finish and clean up their plan directory |
 | `--strict` | exit non-zero if any configuration failed (same as `NAKON_STRICT=1`) |
 | `--only NAME...` | deploy just these machines, by name or IP |
 | `--keep-remote` | leave the unpacked plan on a box for debugging |
@@ -179,7 +186,10 @@ Windows configurations generate a `run.ps1` with a real elevation guard — nako
 self-elevate over SSH, so the SSH principal must already be an administrator. Transport is
 OpenSSH + SFTP with a zip instead of a tarball. Each step self-reports a real exit code (external
 command's `$LASTEXITCODE`, else whether `$Error` collected anything), because most catalog scripts
-are cmdlet-only and never set `$LASTEXITCODE` on their own.
+are cmdlet-only and never set `$LASTEXITCODE` on their own. One consequence for catalog authors:
+`-ErrorAction SilentlyContinue` still appends to `$Error`, so a probe like
+`Get-Item HKLM:\... -ErrorAction SilentlyContinue` on a missing key marks the step failed. Use
+`-ErrorAction Ignore` for probes whose failure is expected.
 
 Verified end-to-end against real Windows Server 2022 boxes, including the full domain-join
 scenario: `ADDS` promotes a box to a new AD forest, `Domain Join` (`Add-Computer`) joins another

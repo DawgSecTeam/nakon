@@ -41,7 +41,7 @@ class AttachmentFetcher:
         if not self.base_url:
             raise CatalogError(
                 f"VULNDB_UI_URL is not set, but '{attachment['original_name']}' has to be "
-                f"downloaded. Point it at the vulndb-ui server (e.g. http://10.0.0.118:3000)."
+                f"downloaded. Set it in .env to the vulndb-ui base URL (see README Setup)."
             )
 
         import requests  # noqa: PLC0415 — deploy hosts don't have this installed

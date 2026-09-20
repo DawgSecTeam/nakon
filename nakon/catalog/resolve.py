@@ -13,8 +13,24 @@ Successor to the old `configurations.resolve()`. Two deliberate changes:
    before anything is deployed.
 """
 
-from ..errors import CycleError, PlatformMismatchError, UnknownConfigurationError
+import re
+
+from ..errors import CycleError, NakonError, PlatformMismatchError, UnknownConfigurationError
 from ..hashing import normalize_request
+
+# A var name has to be a valid identifier in both shells: bash sources `KEY=value` lines under
+# `set -a`, PowerShell gets `$KEY = 'value'` prepended to the step. Anything else either fails
+# to parse on the box or — on bash, where `. vars.env` is executed as root — runs as code.
+_VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _check_var_names(name, var_values, path):
+    bad = sorted(k for k in var_values if not _VAR_NAME.match(str(k)))
+    if bad:
+        raise NakonError(
+            f"configuration '{name}' was given var name(s) {bad} that are not valid shell "
+            f"identifiers ([A-Za-z_][A-Za-z0-9_]*). Reached via: {' -> '.join(path + [name])}"
+        )
 
 # Which script types each platform can actually execute.
 _TYPES_FOR_PLATFORM = {
@@ -73,6 +89,7 @@ def resolve(source, requested: list, platform: str = "linux") -> list:
     emitted = set()  # config names already in `ordered` (packages are deduped by `visited`)
 
     def visit(name, var_values, path):
+        _check_var_names(name, var_values, path)
         key = (name, tuple(sorted(var_values.items())))
         if key in visited:
             return
@@ -115,6 +132,8 @@ def resolve(source, requested: list, platform: str = "linux") -> list:
             "type": (row.get("type") or "bash").lower(),
             "vars": var_values,
             "attachments": row["attachments"],
+            # Raw depends_on, for provenance. Not part of any hashed document.
+            "depends_on": row.get("depends_on") or [],
         })
 
     for item in normalize_request(requested):

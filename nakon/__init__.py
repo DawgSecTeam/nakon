@@ -13,7 +13,7 @@ That split is the point. A saved bundle deploys byte-identical scripts and media
 much the catalog has moved on since, and the deploy host never holds vulndb credentials.
 """
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 # Public API for callers embedding nakon rather than shelling out to it.
 #
@@ -30,7 +30,7 @@ def __getattr__(name):
 
         return build
     if name == "load_machines":
-        from .build.builder import load_machines
+        from .machines import load_machines
 
         return load_machines
     if name in ("deploy", "summarize"):

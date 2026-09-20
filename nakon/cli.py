@@ -8,6 +8,7 @@ this file would make deploy fail on the one host that has to run it.
 
 import argparse
 import json
+import math
 import os
 import sys
 from datetime import datetime
@@ -16,6 +17,7 @@ from pathlib import Path
 from . import __version__
 from .errors import BundleError, NakonError
 from .hashing import short
+from .machines import load_machines
 
 
 def _log(message=""):
@@ -29,6 +31,11 @@ def _log(message=""):
     print(message, file=sys.stderr)
 
 
+def _env_flag(name: str) -> bool:
+    """A boolean env var. NAKON_STRICT=0 / =false / empty means off, not "set, therefore on"."""
+    return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def _load_env():
     """Load .env if python-dotenv is available. Build-side convenience only."""
     try:
@@ -36,10 +43,6 @@ def _load_env():
     except ImportError:
         return
     load_dotenv()
-
-
-def _default_config(args) -> Path:
-    return Path(args.config)
 
 
 def cmd_build(args) -> int:
@@ -76,12 +79,11 @@ def _export(bundle_dir: Path, dest: Path) -> None:
 
 
 def cmd_deploy(args) -> int:
-    from .build.builder import load_machines
     from .deploy.bundle import Bundle
     from .deploy.runner import deploy, summarize
 
     bundle = Bundle.load(args.bundle)
-    machines = load_machines(Path(args.config))
+    machines = load_machines(Path(args.config), warn=lambda m: _log(f"[nakon] WARNING: {m}"))
 
     if args.only:
         wanted = set(args.only)
@@ -137,7 +139,7 @@ def cmd_deploy(args) -> int:
 
         print(json.dumps(outcomes_to_dict(bundle, outcomes, log_dir)))
 
-    strict = args.strict or os.getenv("NAKON_STRICT")
+    strict = args.strict or _env_flag("NAKON_STRICT")
     if failures and strict:
         return 1
     return 0
@@ -145,9 +147,11 @@ def cmd_deploy(args) -> int:
 
 def cmd_diff(args) -> int:
     _load_env()
+    from .build.builder import source_fingerprint
+    from .catalog.resolve import resolve
     from .catalog.source import MySQLCatalog
     from .deploy.bundle import Bundle
-    from .hashing import sha256_text
+    from .hashing import normalize_request, sha256_text
 
     bundle = Bundle.load(args.bundle)
     provenance = bundle.manifest.get("provenance", {})
@@ -185,6 +189,36 @@ def cmd_diff(args) -> int:
             for added in sorted(live_ids - bundled):
                 name = next(a["original_name"] for a in live["attachments"] if str(a["id"]) == added)
                 changes.append(("added", entry["name"], f"new attachment {name}"))
+            # Bundles built before depends_on was recorded have no key here; skip, the
+            # whole-plan check below still catches the drift.
+            if "depends_on" in entry:
+                live_deps = normalize_request(live.get("depends_on") or [])
+                if live_deps != entry["depends_on"]:
+                    changes.append(("changed", entry["name"], "depends_on differs"))
+
+        # Per-configuration checks above only see rows the bundle recorded. A dependency that
+        # was added, removed or renamed pulls a *different* set of rows into the plan, so also
+        # re-resolve every request the bundle serves and compare the resulting source
+        # fingerprint — the same value `nakon build` uses to decide a cache hit.
+        requests = {
+            key: {"platform": req["platform"], "requested": req["requested"]}
+            for key, req in bundle.manifest.get("requests", {}).items()
+        }
+        resolved = {}
+        for key, req in requests.items():
+            try:
+                resolved[key] = resolve(source, req["requested"], req["platform"])
+            except NakonError as exc:
+                names = ", ".join(r["name"] for r in req["requested"])
+                changes.append(("broken", f"[{req['platform']}] {names}", f"no longer resolves: {exc}"))
+        if requests and len(resolved) == len(requests):
+            recorded_fp = bundle.manifest.get("source_fingerprint")
+            if source_fingerprint(requests, resolved) != recorded_fp and not changes:
+                changes.append((
+                    "changed", "(plan)",
+                    "resolved plans differ from the bundle (depends_on / vars / row ids moved) "
+                    "although every recorded configuration still matches",
+                ))
     finally:
         source.close()
 
@@ -265,14 +299,12 @@ def cmd_randomize(args) -> int:
     # instead of importing nakon.catalog.randomize internals — it keeps the selection algorithm
     # in one place behind a stable CLI. With no spec at all, fall through to the original
     # interactive standalone flow (prompts for VMs/difficulty, writes config.json).
-    import math
-
     has_spec = any(
         v is not None
         for v in (args.platform, args.os, args.services, args.vulns, args.difficulty)
     ) or args.exclude or args.json
     if has_spec:
-        return _randomize_select(args, math)
+        return _randomize_select(args)
 
     from .catalog.randomize import main as randomize_main
 
@@ -280,7 +312,7 @@ def cmd_randomize(args) -> int:
     return 0
 
 
-def _randomize_select(args, math) -> int:
+def _randomize_select(args) -> int:
     """Headless `nakon randomize`: read the catalog, pick services+vulns, emit JSON.
 
     Budgets come either explicitly (--services/--vulns) or derived from --difficulty exactly as

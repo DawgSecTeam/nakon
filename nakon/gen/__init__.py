@@ -39,6 +39,15 @@ def step_basename(index: int, step: dict, platform: str = "linux") -> str:
     return f"{index:03d}-{safe_name(step['name'])}{ext}"
 
 
+_WHITESPACE = re.compile(r"\s+")
+
+
 def step_label(step: dict) -> str:
-    """Human/marker-facing name for a step."""
-    return step["package"] if step["kind"] == "package" else step["name"]
+    """Human/marker-facing name for a step.
+
+    Whitespace runs collapse to one space: the label travels on the `##nakon begin` line and in
+    tab-delimited report.tsv / `##nakon rc` records, so a tab in a catalog name would shift the
+    rc column and a newline would split the record. Names have no charset restriction in vulndb.
+    """
+    raw = step["package"] if step["kind"] == "package" else step["name"]
+    return _WHITESPACE.sub(" ", str(raw)).strip() or "step"

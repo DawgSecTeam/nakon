@@ -4,6 +4,46 @@ All notable changes to nakon are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] — 2026-09-20
+
+### Fixed
+- `catalog/query.py` used a `dict | None` annotation, a `TypeError` at import on Python 3.9 (the
+  declared minimum): every `nakon catalog …` command and `nakon randomize --json` died there.
+- `identity_file` in config.json was read by `deploy/ssh.connect` but dropped by `load_machines`
+  first, so key-based SSH never worked. It is carried through now and documented.
+- Windows step scripts were written with `\r\r\n` on every nakon-added line (`render_step_ps1`
+  emitted CRLF and the writer translated `\n` again). PowerShell tolerated it; the file on disk now
+  matches the hashed body. Existing bundles pick it up on `nakon build --rebuild`.
+- Windows `force_cleanup` fired its `Remove-Item` and returned without waiting; the client was
+  then closed and the plan directory could survive a failed run. It now waits (bounded).
+- `nakon diff` missed `depends_on` drift: it only compared rows the bundle recorded, so a
+  dependency added/removed/renamed elsewhere in the graph reported "no drift". It now records
+  `depends_on` in provenance and re-resolves every request against the live catalog.
+- A log-writing error after a machine finished escaped `deploy_machine` and, under `--jobs`,
+  aborted the whole run from `future.result()`. Ctrl-C during a parallel deploy used to keep
+  starting every queued machine; it now cancels those and waits only for in-flight ones, which
+  finish and remove their own plan directory.
+- `NAKON_STRICT=0` counted as strict.
+- **Answer key left on the box after an interrupted run.** Found live: after Ctrl-C (or a dropped
+  connection) mid-deploy, the unpacked plan directory under `/root` survived, because
+  `deploy_machine` only learned its path after `run_streaming` returned normally, so cleanup
+  removed the archive and bootstrap but not the plan itself. The path is now tracked as the
+  bootstrap announces it, and the Linux cleanup also removes the leftover
+  `apt.conf.d/99nakon-lock-timeout` fragment. Verified on Ubuntu 24.04 and Windows Server 2022.
+- The end-of-plan marker re-printed the last step's result line in the live deploy output.
+
+### Added
+- `nakon/machines.py`: `load_machines` (with config.json validation — missing `ip`/`user`,
+  non-string `os`, malformed `configurations` entries are `BundleError`s naming the machine and
+  field; an empty `configurations` list is a warning) and `os_to_platform`, stdlib only, so
+  `nakon deploy` no longer imports the build package for them. Old import paths still work.
+- `resolve()` rejects `vars` keys that are not shell identifiers; bash sourced them under `set -a`
+  as root, PowerShell failed to parse them. Reported through `catalog check` as `unresolvable`.
+- Step labels collapse whitespace so a tab/newline in a catalog name cannot break the
+  tab-delimited `##nakon rc` / report.tsv protocol.
+- `nakon build` warns when a Linux catalog script contains carriage returns (bash fails on CRLF).
+- The "no output from the remote plan" error names the actual Windows cause (non-admin SSH user).
+
 ## [0.1.5] — 2026-09-17
 
 ### Security

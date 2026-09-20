@@ -116,10 +116,6 @@ class MySQLCatalog:
             has_description = False
         return _CONFIG_COLUMNS if has_description else _CONFIG_COLUMNS_LEGACY
 
-    @property
-    def has_descriptions(self):
-        return self._columns is _CONFIG_COLUMNS
-
     @classmethod
     def from_env(cls):
         """Connect using the lowercase .env keys the rest of the toolchain already uses."""

@@ -33,6 +33,7 @@ nakon/
   cli.py             argparse CLI — all subcommands
   errors.py          NakonError hierarchy
   hashing.py         content-addressing (sha256, short ids)
+  machines.py        config.json loading + validation, os→platform (stdlib only; both halves use it)
   build/             BUILD side — needs mysql-connector + requests + python-dotenv
     builder.py       resolve catalog → bundle
     fetch.py         pull attachment bytes from vulndb-ui/MinIO
@@ -41,6 +42,7 @@ nakon/
     source.py        MySQLCatalog, HttpCatalog, DictCatalog (test double)
     query.py         list / describe / check_selection; open_source()
     randomize.py     pick_configurations() selection algorithm + interactive main()
+                     (re-exports os_to_platform from machines.py for existing callers)
     resolve.py       expand depends_on into ordered steps
   deploy/            DEPLOY side — needs paramiko ONLY (never imports build/catalog)
     bundle.py        load + index a saved bundle
@@ -55,7 +57,9 @@ The build/deploy split is load-bearing: `nakon deploy` runs on the locked-down s
 with only paramiko installed (often from a plain directory copy, no install). Never add a
 build-side import (`mysql.connector`, `requests`, `dotenv`) at module scope in anything `deploy`
 imports — keep those inside the function that needs them. See `cli.py` and `catalog/source.py`
-header comments.
+header comments. `cmd_deploy` imports only `deploy/`, `machines.py`, `hashing.py` and `errors.py`;
+keep it that way, and keep those files free of syntax that needs Python > 3.9 (the package
+declares `>=3.9`; a `dict | None` annotation once broke every `catalog` command there).
 
 ## Run / build / test
 
@@ -145,7 +149,9 @@ respect the box's scored services; scale difficulty by mix, not just count. `spl
 `check` catches what nothing else does — most importantly the **typo**: an unknown name is not
 an error anywhere else (`resolve` treats it as a raw package and `apt-get install`s it, planting
 nothing). Error codes: `unknown-name`, `building-block`, `platform-mismatch`/`type-mismatch`,
-`unresolvable`. Warning codes: `no-op`, `duplicate`, `implicit-services`, `no-description`.
+`unresolvable` (cycles, and `vars` keys that aren't shell identifiers — `resolve` rejects
+`[^A-Za-z0-9_]` names so they can't be sourced as code on the box). Warning codes: `no-op`,
+`duplicate`, `implicit-services`, `no-description`.
 
 Both pin files are keyed by box type; every team must defend the identical set so the scoring
 engine's wildcard-IP checks work. Either file alone pins a competition; if neither exists the

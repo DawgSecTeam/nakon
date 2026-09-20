@@ -59,21 +59,25 @@ def render_step_ps1(script: str, var_values: dict) -> str:
     real process exit code is a fallback for the case the file never gets written at all —
     the process crashed, or was killed for exceeding the step timeout — not the primary path.
     """
+    # Plain \n throughout, like render_run_ps1: build/_write_plan writes every Windows file with
+    # newline="\r\n", which translates each \n on the way out. Emitting \r\n here as well used to
+    # produce \r\r\n on every nakon-added line (PowerShell tolerated it, but the file on disk no
+    # longer matched the body that was hashed into blobs/).
     header = "".join(
-        f"${key} = {ps_quote(value)}\r\n" for key, value in sorted(var_values.items())
+        f"${key} = {ps_quote(value)}\n" for key, value in sorted(var_values.items())
     )
     if header:
-        header = f"# nakon: variables for this step\r\n{header}\r\n"
+        header = f"# nakon: variables for this step\n{header}\n"
     trailer = (
-        "\r\n# nakon: compute a real exit code — see render_step_ps1 docstring.\r\n"
-        "if ($LASTEXITCODE) { $__nakon_rc = $LASTEXITCODE }\r\n"
-        "elseif ($Error.Count -gt 0) { $__nakon_rc = 1 }\r\n"
-        "else { $__nakon_rc = 0 }\r\n"
+        "\n# nakon: compute a real exit code — see render_step_ps1 docstring.\n"
+        "if ($LASTEXITCODE) { $__nakon_rc = $LASTEXITCODE }\n"
+        "elseif ($Error.Count -gt 0) { $__nakon_rc = 1 }\n"
+        "else { $__nakon_rc = 0 }\n"
         f"Set-Content -LiteralPath {ps_quote(STEP_RC_FILE)} -Value $__nakon_rc -NoNewline "
-        "-ErrorAction SilentlyContinue\r\n"
-        "exit $__nakon_rc\r\n"
+        "-ErrorAction SilentlyContinue\n"
+        "exit $__nakon_rc\n"
     )
-    return f"{header}$Error.Clear()\r\n{script}\r\n{trailer}"
+    return f"{header}$Error.Clear()\n{script}\n{trailer}"
 
 
 def render_package_step(package: str) -> str:

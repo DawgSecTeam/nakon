@@ -21,7 +21,6 @@ survive a trip through a remote shell's quoting — which also makes the Windows
 the default shell is cmd.exe) tractable.
 """
 
-import os
 import posixpath
 import select
 import shlex
@@ -43,6 +42,12 @@ HEARTBEAT_SECONDS = 60
 # password or host key must fail on the first attempt, not be retried into a slower failure.
 CONNECT_ATTEMPTS = 4
 CONNECT_RETRY_DELAYS = (2, 4, 8)
+
+# Written by the generated run.sh (gen/bash.py NAKON_APT_CONF) and removed at the end of a clean run.
+APT_CONF_FRAGMENT = "/etc/apt/apt.conf.d/99nakon-lock-timeout"
+
+# Upper bound on the best-effort cleanup after a failed run, so it can never hang the deploy.
+CLEANUP_TIMEOUT_SECONDS = 30
 
 
 def connect(machine: dict, timeout: int = 30) -> paramiko.SSHClient:
@@ -284,12 +289,18 @@ def force_cleanup(client, platform, paths, password, plan_dir=None):
                 f"\"foreach ($p in @({items})) {{ Remove-Item -LiteralPath $p -Recurse -Force "
                 "-ErrorAction SilentlyContinue }}\""
             )
-            client.exec_command(command)
+            # Wait for it: the caller closes the client right after this returns, and an
+            # exec_command that is still in flight when the transport goes away may never
+            # run on the box — leaving the plan (the answer key) in C:\Windows\Temp.
+            _, stdout, _ = client.exec_command(command, timeout=CLEANUP_TIMEOUT_SECONDS)
+            stdout.channel.recv_exit_status()
             return
-        quoted = " ".join(shlex.quote(t) for t in targets)
+        # run.sh drops an apt.conf.d fragment for its own duration and removes it on a clean
+        # finish; an interrupted run leaves it behind, so take it here too.
+        quoted = " ".join(shlex.quote(t) for t in targets + [APT_CONF_FRAGMENT])
         plan_part = f" {shlex.quote(plan_dir)}" if plan_dir else ""
         stdin, stdout, _ = client.exec_command(
-            f"sudo -S -p '' rm -rf -- {quoted}{plan_part}"
+            f"sudo -S -p '' rm -rf -- {quoted}{plan_part}", timeout=CLEANUP_TIMEOUT_SECONDS
         )
         if password is not None:
             stdin.write(password + "\n")

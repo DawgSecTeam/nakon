@@ -27,9 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import __version__
-from ..catalog.randomize import os_to_platform
 from ..catalog.resolve import resolve
-from ..errors import BundleError
+from ..machines import load_machines, os_to_platform  # noqa: F401 — re-exported for embedders
 from ..gen import bash as gen_bash
 from ..gen import powershell as gen_ps
 from ..gen import step_basename
@@ -51,34 +50,6 @@ MANIFEST_NAME = "manifest.json"
 CACHE_DIRNAME = ".cache"
 # Length of the hex prefix used for on-disk directory names. Full ids live in the manifest.
 DIR_ID_LEN = 16
-
-
-def load_machines(config_path: Path) -> list:
-    """Read config.json and normalize the bits the builder cares about."""
-    try:
-        data = json.loads(Path(config_path).read_text())
-    except FileNotFoundError as exc:
-        raise BundleError(f"no config file at {config_path}") from exc
-    except json.JSONDecodeError as exc:
-        raise BundleError(f"{config_path} is not valid JSON: {exc}") from exc
-
-    machines = data.get("machines")
-    if not machines:
-        raise BundleError(f"{config_path} has no 'machines' list")
-
-    normalized = []
-    for machine in machines:
-        os_name = machine.get("os", "linux")
-        normalized.append({
-            "name": machine.get("name") or machine.get("ip") or "<unnamed>",
-            "ip": machine.get("ip"),
-            "os": os_name,
-            "user": machine.get("user"),
-            "password": machine.get("password"),
-            "platform": os_to_platform(os_name),
-            "configurations": machine.get("configurations") or [],
-        })
-    return normalized
 
 
 def collect_requests(machines: list) -> dict:
@@ -203,6 +174,20 @@ def _lint_attachment_paths(step: dict, warn) -> None:
             )
 
 
+def _lint_line_endings(step: dict, platform: str, warn) -> None:
+    """Warn about a CR in a Linux script.
+
+    Linux step scripts are written byte-for-byte (that is the contract — what runs is what is
+    in the catalog), so a script saved with CRLF line endings arrives with them and bash then
+    fails on every line with `$'\\r': command not found`. Warn rather than rewrite.
+    """
+    if platform != "windows" and "\r" in step["script"]:
+        warn(
+            f"configuration '{step['name']}' contains carriage returns (CRLF line endings); "
+            f"bash on the target will fail on them. Fix the script in vulndb."
+        )
+
+
 def build(
     source,
     config_path: Path,
@@ -215,7 +200,7 @@ def build(
     out_dir = Path(out_dir)
     warn = warn or (lambda message: log(f"[nakon] WARNING: {message}"))
 
-    machines = load_machines(config_path)
+    machines = load_machines(config_path, warn=warn)
     requests = collect_requests(machines)
     log(f"[nakon] {len(machines)} machine(s), {len(requests)} distinct configuration set(s)")
 
@@ -251,6 +236,7 @@ def build(
             if step["kind"] != "config":
                 continue
             _lint_attachment_paths(step, warn)
+            _lint_line_endings(step, requests[key]["platform"], warn)
             for attachment in step["attachments"]:
                 if attachment["id"] in attachment_hashes:
                     continue
@@ -446,6 +432,9 @@ def _provenance(resolved: dict, attachment_hashes: dict) -> dict:
                 "script_sha256": sha256_text(step["script"]),
                 "run_as": step["run_as"],
                 "type": step["type"],
+                # Provenance only (never hashed): lets `nakon diff` name the configuration
+                # whose dependency list moved, not just report that the resolved plan differs.
+                "depends_on": normalize_request(step["depends_on"]),
             }
             for attachment in step["attachments"]:
                 attachments[str(attachment["id"])] = {

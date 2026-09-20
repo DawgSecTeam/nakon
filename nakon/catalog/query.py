@@ -22,6 +22,7 @@ All of these are cheap to detect before a bundle is ever built, which is what th
 
 import json
 from pathlib import Path
+from typing import Optional
 
 from ..errors import NakonError
 from .randomize import EXCLUDED_NAMES
@@ -264,7 +265,7 @@ def check_selection(source, boxes: list) -> dict:
 
 def boxes_from_config(config_path) -> list:
     """Machines in a nakon config.json, as check_selection boxes."""
-    from ..build.builder import load_machines
+    from ..machines import load_machines
 
     return [
         {"name": m["name"], "platform": m["platform"], "configurations": m["configurations"]}
@@ -273,7 +274,7 @@ def boxes_from_config(config_path) -> list:
 
 
 def boxes_from_pins(vulns_path, services_path=None, platform="linux",
-                    platforms: dict | None = None) -> list:
+                    platforms: Optional[dict] = None) -> list:
     """tezcatlipoca's box_vulns.json (+ optional box_services.json), as check_selection boxes.
 
     Both files are {box_name: [configuration_name, ...]} keyed by box *type*, not per team.

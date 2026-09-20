@@ -15,6 +15,9 @@ import random
 import subprocess
 from pathlib import Path
 
+from ..machines import os_to_platform  # noqa: F401 — re-exported; callers import it from here
+from .source import _parse_depends_on
+
 # Reusable building blocks meant to be pulled in via depends_on, not requested directly
 # (install-package, create-user, enable-service).
 EXCLUDED_NAMES = {"install-package", "create-user", "enable-service"}
@@ -50,11 +53,6 @@ def find_terraform_dir():
         if (Path(candidate) / "main.tf").is_file():
             return str(candidate)
     return None
-
-
-def os_to_platform(os_name):
-    """Map a free-text `os` field (ubuntu24.04, debian12, windows2019, ...) to a platform."""
-    return "windows" if "win" in os_name.lower() else "linux"
 
 
 def fetch_terraform_machines(terraform_dir):
@@ -124,13 +122,10 @@ def load_configurations(cursor):
     for name, category, platform, depends_on_raw in cursor.fetchall():
         if name in EXCLUDED_NAMES:
             continue
-        if depends_on_raw is None:
-            depends_on = []
-        elif isinstance(depends_on_raw, list):
-            depends_on = depends_on_raw
-        else:
-            depends_on = json.loads(depends_on_raw)
-        name_to_row[name] = {"category": category, "platform": platform, "depends_on": depends_on}
+        name_to_row[name] = {
+            "category": category, "platform": platform,
+            "depends_on": _parse_depends_on(depends_on_raw),
+        }
     return name_to_row
 
 
