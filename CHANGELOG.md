@@ -4,6 +4,16 @@ All notable changes to nakon are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] — 2026-09-23
+
+### Fixed
+- `gen/bash.py` wrote a configuration's `run_as` unescaped into a `#` comment line in run.sh. A
+  newline in a catalog `run_as` value ended the comment and ran the rest as root on the box.
+  Whitespace in it is now collapsed to single spaces, as step labels already are.
+
+### Docs
+- README documents `catalog check --boxes-json`.
+
 ## [0.1.6] — 2026-09-20
 
 ### Fixed

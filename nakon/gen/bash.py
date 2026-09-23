@@ -17,7 +17,7 @@ own process, its own $?, and its own working directory.
 
 import shlex
 
-from . import MARKER_BEGIN, MARKER_DONE, MARKER_RC, step_basename, step_label
+from . import _WHITESPACE, MARKER_BEGIN, MARKER_DONE, MARKER_RC, step_basename, step_label
 
 # Wall-clock cap per step. splunk pulls a ~500 MB installer and roundcube drags in
 # apache+mariadb+php, so this has to be generous; override with NAKON_STEP_TIMEOUT.
@@ -228,7 +228,7 @@ def render_run_sh(steps: list, plan_id: str, bundle_id: str, version: str) -> st
         )
 
         parts.append(f"""
-# ── step {idx} — {kind}: {label} (run_as={run_as}) {'─' * max(0, 30 - len(label))}
+# ── step {idx} — {kind}: {label} (run_as={_WHITESPACE.sub(' ', run_as)}) {'─' * max(0, 30 - len(label))}
 printf '%s %s %s %s\\n' "{MARKER_BEGIN}" "{idx}" "{kind}" {shlex.quote(label)}
 _nakon_t0=$SECONDS
 {runner}
