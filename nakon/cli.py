@@ -442,6 +442,10 @@ def cmd_catalog_show(args) -> int:
         print(_wrap(entry["description"] or "(no description)", 96, "    "))
         if entry["depends_on"]:
             print(f"    depends_on: {json.dumps(entry['depends_on'])}")
+        required_vars = entry.get("required_vars")
+        if required_vars:
+            print(f"    required_vars: {', '.join(required_vars)} "
+                  f"(a bare-name request cannot plant this)")
         if entry["attachments"]:
             names = ", ".join(a["original_name"] for a in entry["attachments"])
             print(f"    attachments: {names}")

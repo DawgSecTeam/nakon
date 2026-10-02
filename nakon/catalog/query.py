@@ -14,6 +14,8 @@ silently or late:
   * install-package / create-user / enable-service are building blocks meant to be pulled in
     through depends_on, and requesting one directly plants a no-op;
   * a windows configuration on a linux box only fails once the build reaches it;
+  * a configuration whose script reads a var the request never supplies (e.g. a bare-name pin
+    of `hosts-redirect-linux`, which needs `IP`/`HOSTS`) aborts the step mid-deploy with rc=2;
   * a few catalog rows have an empty script and no dependencies, so they build into a step that
     does nothing.
 
@@ -27,6 +29,7 @@ from typing import Optional
 from ..errors import NakonError
 from .randomize import EXCLUDED_NAMES
 from .resolve import _TYPES_FOR_PLATFORM, resolve
+from .vars import required_vars_for_row, unsatisfied_required_vars
 
 # Severity levels a problem can carry. Errors mean the selection will not deploy as intended;
 # warnings mean it will deploy but probably isn't what anyone wanted.
@@ -99,6 +102,11 @@ def _public_row(row: dict) -> dict:
         "run_as": row.get("run_as") or "root",
         "depends_on": row.get("depends_on") or [],
         "script": row.get("script") or "",
+        # Vars this step's script reads but nothing supplies. Derived from the script body
+        # (the catalog has no such column) — see catalog/vars.py. A non-empty list means a
+        # bare-name request cannot plant it; tezcatlipoca fills identity vars itself and
+        # lints the rest at bundle build.
+        "required_vars": required_vars_for_row(row),
         "attachments": [
             {"original_name": a.get("original_name"), "size_bytes": a.get("size_bytes")}
             for a in (row.get("attachments") or [])
@@ -192,8 +200,10 @@ def check_selection(source, boxes: list) -> dict:
         requested = box.get("configurations") or []
         problems = []
 
-        def add(level, code, message, config=None):
-            problems.append({"level": level, "code": code, "config": config, "message": message})
+        def add(level, code, message, config=None, **extra):
+            problem = {"level": level, "code": code, "config": config, "message": message}
+            problem.update(extra)
+            problems.append(problem)
 
         names = [item if isinstance(item, str) else item.get("name") for item in requested]
 
@@ -203,7 +213,12 @@ def check_selection(source, boxes: list) -> dict:
                 add(WARNING, "duplicate", "selected more than once", name)
             seen.add(name)
 
-        for name in names:
+        for item in requested:
+            if isinstance(item, str):
+                name, provided = item, {}
+            else:
+                name, provided = item.get("name"), item.get("vars") or {}
+
             if name in EXCLUDED_NAMES:
                 add(ERROR, "building-block",
                     "is a reusable building block meant to be pulled in through another "
@@ -221,6 +236,22 @@ def check_selection(source, boxes: list) -> dict:
 
             for level, code, message in _platform_problems(row, platform):
                 add(level, code, message, name)
+
+            # A var the script reads but the request does not supply aborts the plant (bash
+            # `${VAR:?}` exits rc=2 immediately). The catalog has no required-vars column, so
+            # this is derived from the script body — the same rule the deploy-time bundle lint
+            # applies. Fail it here, before a bundle is built or a box touched.
+            required = required_vars_for_row(row)
+            missing = unsatisfied_required_vars(row, provided)
+            if missing:
+                fix = {"name": name, "vars": {var: "<value>" for var in missing}}
+                where = ("a bare name supplies no vars" if isinstance(item, str)
+                         else "the pinned \"vars\" object does not cover them")
+                add(ERROR, "missing-vars",
+                    f"requires var(s) {', '.join(missing)} ({where}), so the plant would fail "
+                    f"mid-deploy. Pin it as {json.dumps(fix)} in box_vulns.json/"
+                    f"box_services.json, or drop it.",
+                    name, missing=missing, required_vars=required)
 
             if not (row.get("script") or "").strip() and not (row.get("depends_on") or []):
                 add(WARNING, "no-op",

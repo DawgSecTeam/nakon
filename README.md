@@ -119,10 +119,14 @@ nakon catalog check --box-vulns competitions/x/box_vulns.json \
 `check` catches what nothing else does. Most importantly the **typo**: an unknown name is not an
 error anywhere else — `resolve` treats it as a raw package and `apt-get install`s it, planting
 nothing. It also catches building blocks requested directly, windows configs on linux boxes,
-dependency cycles, empty-script no-ops, duplicates and implicitly-pulled services. Exit `0` clean,
-`1` on errors, `--strict` to fail on warnings too. With `--boxes-json` (tezcatlipoca's
-`boxes.json`), each box's platform comes from its template name (containing `win` means
-windows), which overrides `--platform`.
+dependency cycles, empty-script no-ops, duplicates, implicitly-pulled services, and
+**`missing-vars`**: a configuration whose script reads a variable the request does not supply (a
+bare-name pin, or a `{"name","vars"}` pin missing a key). Every row carries its `required_vars`
+in `list --json` / `show --json` — derived from the script body, because the catalog has no such
+column — so a consumer can gate a pin without re-deriving it. Exit `0` clean, `1` on errors,
+`--strict` to fail on warnings too. With `--boxes-json` (tezcatlipoca's `boxes.json`), each box's
+platform comes from its template name (containing `win` means windows), which overrides
+`--platform`.
 
 `--source auto` (default) reads vulndb-ui over HTTP when `VULNDB_UI_URL` is set — **no database
 credentials needed** — and falls back to MySQL. `build` always uses MySQL directly, because the

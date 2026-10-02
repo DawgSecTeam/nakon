@@ -4,6 +4,17 @@ All notable changes to nakon are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **`catalog check` did not catch a missing-var pin.** A bare-name (or var-incomplete
+  `{"name","vars"}`) request of a configuration whose script reads a variable the request never
+  supplies now fails with error code `missing-vars`, naming the vars and the exact JSON to pin; it
+  previously reported the selection clean and the plant then failed mid-deploy (rc=2). Every
+  `catalog list` / `catalog show --json` row now carries `required_vars`, derived from the script
+  body because the catalog has no such column — with the same rules as tezcatlipoca's deploy-time
+  bundle lint (`nakon_ops._lint_bundle_vars`); keep the two in sync. PowerShell rows are
+  deliberately not derived, matching that lint.
 ## [0.1.7] — 2026-09-23
 
 ### Fixed
