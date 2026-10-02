@@ -15,6 +15,10 @@ All notable changes to nakon are documented here. The format is based on
   body because the catalog has no such column — with the same rules as tezcatlipoca's deploy-time
   bundle lint (`nakon_ops._lint_bundle_vars`); keep the two in sync. PowerShell rows are
   deliberately not derived, matching that lint.
+- **The Windows package step reported its rc through `Process.ExitCode` alone.** It now writes
+  `.nakon-step-rc` — the value `Nakon-Step` trusts over the process exit code — on every path,
+  like the other Windows steps.
+
 ## [0.1.7] — 2026-09-23
 
 ### Fixed
