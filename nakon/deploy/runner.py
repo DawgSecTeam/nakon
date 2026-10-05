@@ -153,7 +153,9 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
 
         if state["report"]:
             outcome.progress.merge_report("\n".join(state["report"]))
-        elif not outcome.progress.results():
+        elif step_count and not outcome.progress.results():
+            # A zero-step plan legitimately exits 0 with no report and no results; only a plan
+            # that HAD steps and never reported points at credentials/sudo.
             hint = (
                 "the SSH user must be a local administrator (run.ps1 exits 78 otherwise)"
                 if platform == "windows"

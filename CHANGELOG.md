@@ -7,6 +7,10 @@ All notable changes to nakon are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **A 0-step plan was failed as a credential problem.** A machine whose `configurations` list is
+  empty dispatches a plan with no steps; its clean silent exit (0, no report, no results) now counts
+  as success instead of "no output from the remote plan — check credentials and sudo access".
+  The hint only fires when the plan had steps that never reported.
 - **`catalog check` did not catch a missing-var pin.** A bare-name (or var-incomplete
   `{"name","vars"}`) request of a configuration whose script reads a variable the request never
   supplies now fails with error code `missing-vars`, naming the vars and the exact JSON to pin; it
