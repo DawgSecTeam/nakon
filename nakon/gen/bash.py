@@ -63,13 +63,21 @@ PKG={shlex.quote(package)}
 # /var/lib/apt/lists/lock and nothing else, so waiting on lock-frontend alone still races
 # and fails with "Could not get lock /var/lib/apt/lists/lock".
 nakon_dpkg_wait() {{
-    command -v fuser >/dev/null 2>&1 || return 0
     for _ in $(seq 1 90); do
-        fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \\
-              /var/lib/apt/lists/lock /var/cache/apt/archives/lock \\
-              >/dev/null 2>&1 || break
+        if command -v fuser >/dev/null 2>&1; then
+            fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \\
+                  /var/lib/apt/lists/lock /var/cache/apt/archives/lock \\
+                  >/dev/null 2>&1 || return 0
+        elif command -v lsof >/dev/null 2>&1; then
+            lsof /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \\
+                 /var/lib/apt/lists/lock /var/cache/apt/archives/lock \\
+                 >/dev/null 2>&1 || return 0
+        else
+            pgrep -x apt-get >/dev/null 2>&1 || pgrep -x unattended-upgrade >/dev/null 2>&1 || return 0
+        fi
         sleep 2
     done
+    return 1
 }}
 
 if command -v apt-get >/dev/null 2>&1; then
@@ -167,13 +175,21 @@ nakon_step_user() {{  # script workdir varsfile interp user
 # lock-frontend alone still loses the race and dies with "Could not get lock
 # /var/lib/apt/lists/lock" — observed on a freshly-cloned Ubuntu 24.04 box.
 nakon_dpkg_wait() {{
-    command -v fuser >/dev/null 2>&1 || return 0
     for _ in $(seq 1 90); do
-        fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \\
-              /var/lib/apt/lists/lock /var/cache/apt/archives/lock \\
-              >/dev/null 2>&1 || break
+        if command -v fuser >/dev/null 2>&1; then
+            fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \\
+                  /var/lib/apt/lists/lock /var/cache/apt/archives/lock \\
+                  >/dev/null 2>&1 || return 0
+        elif command -v lsof >/dev/null 2>&1; then
+            lsof /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \\
+                 /var/lib/apt/lists/lock /var/cache/apt/archives/lock \\
+                 >/dev/null 2>&1 || return 0
+        else
+            pgrep -x apt-get >/dev/null 2>&1 || pgrep -x unattended-upgrade >/dev/null 2>&1 || return 0
+        fi
         sleep 2
     done
+    return 1
 }}
 
 # Once up front, before the first step touches a package manager. Mirrors the
@@ -188,9 +204,11 @@ nakon_dpkg_wait
 #
 # Scope, precisely: DPkg::Lock::Timeout covers the dpkg frontend and archives locks, i.e.
 # `apt-get install`. It does NOT cover /var/lib/apt/lists/lock, which `apt-get update` takes
-# and which has no wait option at all — that one is only handled by nakon_dpkg_wait above.
-# No configuration in the catalog runs `apt-get update`, so that gap is currently unreachable;
-# if one ever does, it needs its own lock wait.
+# and which has no wait option at all — that one is only handled by nakon_dpkg_wait.
+# The catalog DOES run `apt-get update` (install-package does, live-found 2026-10-13:
+# web01-golden's step 007 died rc=100 on a lists-lock held by an earlier apt-get), so the
+# wait is re-run before EVERY step below, not just once up front — a lock can be taken by
+# the previous step's apt work or an unattended-upgrades window that opened mid-plan.
 #
 # Removed at the end of the run.
 NAKON_APT_CONF=/etc/apt/apt.conf.d/99nakon-lock-timeout
@@ -231,6 +249,7 @@ def render_run_sh(steps: list, plan_id: str, bundle_id: str, version: str) -> st
 # ── step {idx} — {kind}: {label} (run_as={_WHITESPACE.sub(' ', run_as)}) {'─' * max(0, 30 - len(label))}
 printf '%s %s %s %s\\n' "{MARKER_BEGIN}" "{idx}" "{kind}" {shlex.quote(label)}
 _nakon_t0=$SECONDS
+nakon_dpkg_wait || echo "[nakon] apt locks remained busy before step {idx}" >&2
 {runner}
 nakon_record {idx} {shlex.quote(label)} {kind} $? $((SECONDS - _nakon_t0))
 """)
