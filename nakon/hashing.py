@@ -1,44 +1,22 @@
-"""Canonical serialization and the content hashes bundles are built around.
+"""Canonical JSON serialization and the hashes bundles are built around.
 
-Three distinct hashes, and conflating them is the trap this module exists to prevent:
+`request_key` identifies what was asked for; `plan_id` a resolved step list;
+`bundle_id` the whole bundle. `config_digest` covers the machine list a bundle
+was built from, so deploy can prove it is applying the same build input.
+`source_fingerprint` (see build.builder) hashes what the catalog contributed.
 
-- `request_key`  — identifies *what was asked for* (platform + ordered request list). Plans
-  are looked up by this, never by machine name, so a bundle built from one team's machines
-  serves every other team whose request list is identical.
-- `plan_id`      — identifies a fully resolved, ordered step list including script and
-  attachment content hashes.
-- `bundle_id`    — identifies the whole bundle: its plans *and* its request→plan map.
-
-`source_fingerprint` (see build.builder) is a fourth, deliberately cheaper hash used only as
-a cache key; it is computed from MySQL alone so `nakon build` can decide whether to reuse a
-cached bundle before downloading a single attachment byte.
-
-Every hash is taken over a canonical JSON document, never over file or archive bytes — so a
-tarball or gzip library upgrade can never change an id.
+Hashes cover canonical JSON, never archive bytes.
 """
 
 import hashlib
 import json
 
-# Bump when the shape of a hashed document changes in a way that must invalidate existing
-# bundles. It is part of every document below, so bumping it re-keys everything at once.
-#
-# Bumped 1 -> 2: nakon_step_root/nakon_step_user in gen/bash.py now `set -a` before sourcing
-# a step's vars file so the assignments are exported into the step's own exec'd process —
-# previously a plain (non-exported) shell variable, silently dropped across the `exec`, so
-# every step with vars (install-package's $PACKAGE, enable-service's $SERVICE, ...) ran with
-# them empty. bundle_id hashes resolved plan *content*, not nakon's own generator code, so
-# without this bump every bundle built before the fix keeps being served from cache forever.
-SCHEMA = 2
+# Bump when a hashed document shape changes; it re-keys everything at once.
+SCHEMA = 4
 
 
 def canon(obj) -> bytes:
-    """Serialize to canonical JSON: sorted keys, no whitespace, ASCII-escaped.
-
-    ensure_ascii matters — attachment names in the live catalog contain non-ASCII characters
-    (one object_key holds a narrow no-break space), and we need the same bytes on every
-    platform regardless of filesystem encoding.
-    """
+    """Canonical JSON: sorted keys, no whitespace, ASCII-escaped."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
@@ -63,13 +41,7 @@ def sha256_file(path, chunk_size: int = 1 << 20) -> str:
 
 
 def normalize_request(requested: list) -> list:
-    """Normalize a machine's `configurations` list to the canonical [{name, vars}] form.
-
-    Mirrors the old configurations._normalize: an entry is either a bare string or an object
-    with `name` and optional `vars`. Order is preserved and is load-bearing — resolve() walks
-    the request list in order and that determines the deployed step order, so two lists with
-    the same members in a different order are genuinely different requests.
-    """
+    """Normalize `configurations` to [{name, vars}]. Order is preserved and load-bearing."""
     normalized = []
     for entry in requested:
         if isinstance(entry, str):
@@ -77,26 +49,41 @@ def normalize_request(requested: list) -> list:
         else:
             normalized.append({
                 "name": entry["name"],
-                # Coerce values to str here so {"PORT": 8080} and {"PORT": "8080"} hash the
-                # same way they deploy — build_script's shlex.quote(str(value)) made them
-                # identical on the wire, so they must be identical in the key too.
+                # Coerce to str so {"PORT": 8080} and {"PORT": "8080"} hash the same.
                 "vars": {k: str(v) for k, v in (entry.get("vars") or {}).items()},
             })
     return normalized
 
 
 def request_key(platform: str, requested: list) -> str:
-    """Hash a machine's *request*: its platform plus its normalized, ordered config list.
-
-    Machine name, IP, OS string and credentials are deliberately excluded. That is what lets
-    a bundle built from a single team's config.json deploy every other team, and what makes
-    re-IPing or renaming a box a no-op for the cache.
-    """
+    """Hash a request: platform plus normalized, ordered config list."""
     return sha256_json({
         "schema": SCHEMA,
         "kind": "request",
         "platform": platform,
         "requested": normalize_request(requested),
+    })
+
+
+def config_digest(machines: list) -> str:
+    """Hash the machine list a bundle was built from.
+
+    Covers name, platform and the normalized, ordered configuration list —
+    everything that defines the build input and its human handle. Excludes
+    address and credential fields (ip, user, password, identity_file): those
+    are reconciled per deploy and may be rewritten after the build.
+    """
+    return sha256_json({
+        "schema": SCHEMA,
+        "kind": "config-digest",
+        "machines": [
+            {
+                "name": machine["name"],
+                "platform": machine["platform"],
+                "configurations": normalize_request(machine["configurations"]),
+            }
+            for machine in machines
+        ],
     })
 
 
@@ -106,13 +93,7 @@ def plan_id(plan_doc: dict) -> str:
 
 
 def bundle_id(plans: dict, requests: dict) -> str:
-    """Hash the bundle identity: every plan document plus the request→plan mapping.
-
-    The requests map has to be in here. Without it, two different request lists that resolve
-    to the same plan set (say ["a"] and ["a","a"]) would produce the same bundle id, the
-    second build would hit the cache, and deploy would then fail to find a request key the
-    cached manifest never recorded.
-    """
+    """Hash bundle identity: every plan document plus the request->plan mapping."""
     return sha256_json({
         "schema": SCHEMA,
         "kind": "bundle",

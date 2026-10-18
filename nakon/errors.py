@@ -10,15 +10,11 @@ class CycleError(NakonError):
 
 
 class UnknownConfigurationError(NakonError):
-    """A requested name matched no configuration and can't be a package fallback."""
+    """A requested name matched no configuration in the catalog."""
 
 
 class PlatformMismatchError(NakonError):
-    """A configuration's script `type` can't run on the machine's platform.
-
-    The old deploy.py would happily hand a powershell script to bash on Ubuntu; catching
-    this at build time is the whole point of resolving ahead of the deploy.
-    """
+    """A configuration's script `type` can't run on the machine's platform."""
 
 
 class BundleError(NakonError):

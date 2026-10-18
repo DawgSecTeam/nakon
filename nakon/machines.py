@@ -1,11 +1,4 @@
-"""config.json — the machine list — and the one derivation every half of nakon needs from it.
-
-Stdlib only, on purpose. `nakon deploy` reads config.json on the scoring engine (paramiko and
-nothing else installed), and `nakon build` / `nakon catalog check` read it on the build host.
-Keeping this in its own module is what lets the deploy half honour "never imports build/ or
-catalog/": before, `cli.cmd_deploy` pulled `load_machines` out of `build/builder.py`, which
-dragged the whole build package (fetch, tarball, gen, catalog.randomize) onto the deploy host.
-"""
+"""config.json loading, and the os -> platform mapping both halves use. Stdlib only."""
 
 import json
 from pathlib import Path
@@ -14,13 +7,12 @@ from .errors import BundleError
 
 
 def os_to_platform(os_name) -> str:
-    """Map a free-text `os` field (ubuntu24.04, debian12, windows2019, ...) to a platform."""
+    """Map a free-text `os` field to a platform."""
     return "windows" if "win" in str(os_name or "").lower() else "linux"
 
 
 def _validate_configurations(label: str, requested) -> list:
-    """Every entry must be a name or {"name": ..., "vars": {...}} — anything else would only
-    surface later as a bare KeyError inside hashing.normalize_request or paramiko."""
+    """Entries must be a name or {"name": ..., "vars": {...}}."""
     if not isinstance(requested, list):
         raise BundleError(f"{label}: 'configurations' must be a list, got {type(requested).__name__}")
     for position, entry in enumerate(requested):
@@ -43,12 +35,7 @@ def _validate_configurations(label: str, requested) -> list:
 
 
 def load_machines(config_path, warn=None) -> list:
-    """Read config.json and normalize the bits nakon cares about.
-
-    Raises BundleError with the machine and field named for anything malformed; `warn`, if
-    given, is called for things that are legal but almost certainly not intended (a machine
-    with nothing to deploy).
-    """
+    """Read config.json. Raises BundleError naming the machine and field."""
     config_path = Path(config_path)
     try:
         data = json.loads(config_path.read_text())
@@ -95,8 +82,6 @@ def load_machines(config_path, warn=None) -> list:
             "os": os_name,
             "user": user,
             "password": machine.get("password"),
-            # Optional: an SSH private key path. Carried through so deploy/ssh.connect can use
-            # it; it used to be read there but never survived this normalization.
             "identity_file": identity_file,
             "platform": os_to_platform(os_name),
             "configurations": requested,

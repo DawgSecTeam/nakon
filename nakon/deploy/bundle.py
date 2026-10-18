@@ -1,17 +1,10 @@
-"""Read a built bundle and map machines onto plans.
-
-The lookup is by `request_key` — platform plus the ordered configuration list — never by
-machine name. That is what lets tezcatlipoca build a bundle from the full competition and
-then deploy team1 alone in phase 5 and every team in phase 6, from one bundle, in either
-order. It also means a machine whose configuration list has drifted since the build fails
-loudly instead of quietly deploying a stale set.
-"""
+"""Read a built bundle and map machines onto plans by request_key."""
 
 import json
 from pathlib import Path
 
 from ..errors import BundleError
-from ..hashing import SCHEMA, request_key, short
+from ..hashing import SCHEMA, config_digest, request_key, short
 
 MANIFEST_NAME = "manifest.json"
 
@@ -39,12 +32,32 @@ class Bundle:
         if manifest.get("schema") != SCHEMA:
             raise BundleError(
                 f"bundle {path} has schema {manifest.get('schema')}, this nakon speaks "
-                f"{SCHEMA}. Rebuild it with `nakon build --rebuild`."
+                f"{SCHEMA}. Rebuild it with `nakon build`."
             )
         return cls(path, manifest)
 
+    def verify_config(self, machines: list) -> None:
+        """Prove the config being deployed is the one this bundle was built from.
+
+        Catches drift that request_key routing cannot: a renamed or re-listed
+        machine whose request still matches some plan in the bundle. Checked on
+        the full machine list, before --only filtering, so subset deploys pass.
+        """
+        recorded = self.manifest.get("config_digest")
+        if not recorded:
+            raise BundleError(
+                f"bundle {short(self.bundle_id)} has no config_digest (built by an "
+                f"older nakon). Rebuild it with `nakon build`."
+            )
+        current = config_digest(machines)
+        if current != recorded:
+            raise BundleError(
+                f"the config differs from the one bundle {short(self.bundle_id)} was "
+                f"built from (digest {short(current)} != {short(recorded)}). Rebuild "
+                f"the bundle, or deploy the one that matches this config."
+            )
+
     def plan_for(self, machine: dict) -> tuple:
-        """Return (plan_id, plan_entry) for a machine, or raise with a useful message."""
         key = request_key(machine["platform"], machine["configurations"])
         entry = self.manifest["requests"].get(key)
         if entry is None:

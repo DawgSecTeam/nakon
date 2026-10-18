@@ -41,9 +41,7 @@ pip install -e '.[build]'    # build host:  mysql-connector-python, requests, py
 pip install -e '.[deploy]'   # deploy host: paramiko (only)
 ```
 
-Installing is optional — `python3 -m nakon` runs from a plain directory copy, which is how the
-scoring engine gets it (tezcatlipoca scp's the package directory over).
-
+Installing is optional — `python3 -m nakon` runs from a plain directory copy.
 `.env` in the project root (gitignored) — **build side only**:
 
 ```env
@@ -55,7 +53,7 @@ VULNDB_UI_URL=http://10.0.0.119:3000
 ```
 
 `config.json` lists the target machines (gitignored — live credentials and IPs). See
-`config-example.json`. Generate one interactively with `python3 -m nakon randomize`. Each machine
+`config-example.json`. Each machine
 needs `ip`, `user` and `configurations`; `password` is the SSH/sudo password, and an optional
 `identity_file` (path to a private key) is used for SSH instead when given. Malformed entries are
 rejected up front with the machine and field named, before anything is built or deployed.
@@ -63,12 +61,12 @@ rejected up front with the machine and field named, before anything is built or 
 ## Quickstart
 
 ```bash
-python3 -m nakon build                       --json   # -> bundles/<id>/ (or reuse a cache hit)
+python3 -m nakon build                       --json   # -> bundles/<id>/ (content-addressed)
 python3 -m nakon show   --bundle bundles/<id>         # what's in it (offline)
 python3 -m nakon diff   --bundle bundles/<id>         # has the catalog moved since?
 python3 -m nakon deploy --bundle bundles/<id> --json
 
-python3 -m nakon randomize --platform linux --services 2 --vulns 3 --json  # non-interactive pick
+python3 -m nakon randomize --platform linux --services 2 --vulns 3 --json  # pick a set
 python3 -m nakon catalog list   --platform linux --json                   # browse the catalog
 python3 -m nakon catalog show   suid-find --json
 python3 -m nakon catalog check  --select suid-find,ssh-root-login --json   # vet a selection
@@ -87,9 +85,10 @@ reusable unit: `name` (kebab-case slug, the join key across the whole ecosystem)
 (MinIO-backed) holds files a script needs alongside it. A vulnerability and a service install are
 both just configurations — list one and it always runs.
 
-`depends_on` entries are either a bare package name (installed via the host package manager) or
+`depends_on` entries are a bare configuration name or
 `{"name": "create-user", "vars": {"USERNAME": "splunk"}}` — `vars` surface as shell variables in
-the script. vulndb-ui ships reusable blocks to depend on rather than duplicate: `install-package`
+the script. Every name must match a catalog configuration; an unknown name fails the build.
+vulndb-ui ships reusable blocks to depend on rather than duplicate: `install-package`
 (`PACKAGE`), `create-user` (`USERNAME`), `enable-service` (`SERVICE`).
 
 Attachments download at **build** time and travel in the bundle; each step gets its own working
@@ -99,10 +98,8 @@ directory, so a script refers to them by relative path (`cp ./malicious.conf /et
 
 `nakon randomize --services N --vulns M --json` picks a platform's worth of services and
 vulns/misconfigs from the catalog and prints `{"platform","services","vulns"}`. Budgets are upper
-bounds — a small catalog yields fewer. `--difficulty 1-10` derives them (services = ⌈d/3⌉, vulns =
-d); `--os ubuntu24.04` maps free text to a platform; `--exclude NAME…` removes entries from the
-pool. With no flags, it runs the original interactive flow (prompts for VMs/difficulty, writes
-`config.json`). `--source auto|http|mysql` chooses where to read.
+bounds — a small catalog yields fewer. `--os ubuntu24.04` maps free text to a platform;
+`--exclude NAME…` removes entries from the pool. `--source auto|http|mysql` chooses where to read.
 
 ### `catalog` — read and vet
 
@@ -111,26 +108,32 @@ Read-only; never builds or writes, so it is safe to point an agent at.
 ```bash
 nakon catalog list  --platform linux --category misconfiguration --json
 nakon catalog show  www-data-shell --json
-nakon catalog check --box-vulns competitions/x/box_vulns.json \
-                    --box-services competitions/x/box_services.json \
-                    --boxes-json competitions/x/boxes.json
+nakon catalog check --pins competitions/x/vulns.json competitions/x/services.json \
+                    --platforms competitions/x/platforms.json
 ```
 
-`check` catches what nothing else does. Most importantly the **typo**: an unknown name is not an
-error anywhere else — `resolve` treats it as a raw package and `apt-get install`s it, planting
-nothing. It also catches building blocks requested directly, windows configs on linux boxes,
+`check` catches what nothing else does cheaply. Most importantly the **typo**: an unknown name
+is an error — `catalog check` reports it as `unknown-name` before a bundle is ever built, and
+`build` refuses it outright. It also catches building blocks requested directly, windows configs on linux boxes,
 dependency cycles, empty-script no-ops, duplicates, implicitly-pulled services, and
 **`missing-vars`**: a configuration whose script reads a variable the request does not supply (a
-bare-name pin, or a `{"name","vars"}` pin missing a key). Every row carries its `required_vars`
-in `list --json` / `show --json` — derived from the script body, because the catalog has no such
-column — so a consumer can gate a pin without re-deriving it. Exit `0` clean, `1` on errors,
-`--strict` to fail on warnings too. With `--boxes-json` (tezcatlipoca's `boxes.json`), each box's
-platform comes from its template name (containing `win` means windows), which overrides
-`--platform`.
+bare-name pin, or a `{"name","vars"}` pin missing a key). Every row declares its `required_vars` in
+`list --json` / `show --json` — authored with `vulndb-cli update <name> --required-vars …`, read
+back by nakon, never re-derived — so a consumer can gate a pin without re-deriving it. Exit `0`
+clean, `1` on errors, `--strict` to fail on warnings too. With `--platforms` (a JSON object
+mapping box name to `linux`/`windows`), a per-box platform overrides `--platform`.
 
 `--source auto` (default) reads vulndb-ui over HTTP when `VULNDB_UI_URL` is set — **no database
 credentials needed** — and falls back to MySQL. `build` always uses MySQL directly, because the
 HTTP API omits attachments' `object_key`, which the source fingerprint hashes.
+
+Choosing *which* misconfigurations a box gets is a judgement call, not nakon's: read the catalog
+(`list --json` carries script bodies, not just descriptions), pick per box **type**, then vet with
+`catalog check` — an unknown name is an error — before writing the per-box pin files, which must
+pin the identical set for every team. Never select
+`install-package` / `create-user` / `enable-service` directly (they're building blocks pulled in via
+`depends_on`), and if you had to read a script to work out what a row does, write it down with
+`vulndb-cli describe <name> "<prose>" --yes`.
 
 ## What a bundle looks like
 
@@ -173,16 +176,8 @@ on for a live event.
 
 The intended integration is a **subprocess CLI**: `python3 -m nakon …` with `--config`/`--out`
 taking paths, so a consumer keeps its own files in its own repo. Parse `--json` from stdout; logs
-are on stderr. (huitzilopochtli and tezcatlipoca both consume it this way, as a git submodule at
-`vendor/nakon`.)
+are on stderr. Consumers typically vendor the repo as a git submodule at `vendor/nakon`.
 
-To embed instead: `pip install -e path/to/nakon` and
-
-```python
-from nakon import build, deploy, summarize, Bundle, load_machines
-```
-
-These resolve lazily, so `import nakon` on a deploy host still doesn't pull in the build half.
 `pyproject.toml` declares **no required dependencies** — the two halves are extras
 (`nakon[build]`, `nakon[deploy]`) — because the scoring engine often runs nakon from a plain
 directory copy with only paramiko installed.
@@ -202,11 +197,10 @@ Verified end-to-end against real Windows Server 2022 boxes, including the full d
 scenario: `ADDS` promotes a box to a new AD forest, `Domain Join` (`Add-Computer`) joins another
 box to it, and AD-aware catalog rows (`Add User Account`/`Elevate User Account`/`Disable System
 Firewall`) correctly create/elevate real AD objects once run against a live DC — driven through
-tezcatlipoca's `create-competition.py`/`deploy_windows_domain_configs()`, which handles the
+the competition's deploy driver, which handles the
 reboot-tolerant sequencing this needs (ADDS and Domain Join each reboot the box, so each has to
 run in its own single-config deploy pass, and cloning has to happen before any DC is promoted,
-never after). The one remaining untested corner is the `winget`/`choco` package-manager fallback
-(`render_package_step`) — no catalog config exercised in this pass used it.
+never after).
 
 ## Releasing
 

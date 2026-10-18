@@ -1,26 +1,4 @@
-"""Read the catalog, and vet a proposed selection against it.
-
-This is the surface an agent uses to choose the misconfigurations for a competition. The split
-is deliberate: nakon supplies context and verification, the caller supplies judgement. Nothing
-here calls a model, ranks configurations, or decides anything — it answers "what is available?"
-and "is what you picked coherent?", and leaves the choosing to whoever asked.
-
-`check` is the part that earns its keep. Several ways of getting a selection wrong currently fail
-silently or late:
-
-  * a mistyped name is not an error anywhere — resolve() treats an unknown name as a raw package
-    (see resolve.py), so `suid-fnd` becomes `apt-get install suid-fnd` and the box quietly ends up
-    with no misconfiguration at all;
-  * install-package / create-user / enable-service are building blocks meant to be pulled in
-    through depends_on, and requesting one directly plants a no-op;
-  * a windows configuration on a linux box only fails once the build reaches it;
-  * a configuration whose script reads a var the request never supplies (e.g. a bare-name pin
-    of `hosts-redirect-linux`, which needs `IP`/`HOSTS`) aborts the step mid-deploy with rc=2;
-  * a few catalog rows have an empty script and no dependencies, so they build into a step that
-    does nothing.
-
-All of these are cheap to detect before a bundle is ever built, which is what this module does.
-"""
+"""Read the catalog, and vet a proposed selection against it."""
 
 import json
 from pathlib import Path
@@ -29,7 +7,6 @@ from typing import Optional
 from ..errors import NakonError
 from .randomize import EXCLUDED_NAMES
 from .resolve import _TYPES_FOR_PLATFORM, resolve
-from .vars import required_vars_for_row, unsatisfied_required_vars
 
 # Severity levels a problem can carry. Errors mean the selection will not deploy as intended;
 # warnings mean it will deploy but probably isn't what anyone wanted.
@@ -38,11 +15,7 @@ WARNING = "warning"
 
 
 def open_source(kind: str = "auto"):
-    """Open a catalog source. 'http' needs VULNDB_UI_URL; 'mysql' needs the .env credentials.
-
-    'auto' prefers HTTP, because that is the path that works for an agent with no database
-    credentials, and falls back to MySQL when VULNDB_UI_URL isn't set.
-    """
+    """'auto' prefers HTTP, falling back to MySQL when VULNDB_UI_URL isn't set."""
     import os
 
     from .source import HttpCatalog, MySQLCatalog
@@ -60,17 +33,12 @@ def open_source(kind: str = "auto"):
 
 
 def _index(source) -> dict:
-    """{name: row} for the whole catalog, in one round trip."""
     return {row["name"]: row for row in source.all_rows()}
 
 
 def list_configurations(source, platform=None, category=None, search=None,
                         include_blocks=False) -> list:
-    """Every configuration, filtered. Records are returned whole — script included.
-
-    An agent choosing a set needs to read the script; the description says what a config is for,
-    but the script is the only thing that says exactly what it does.
-    """
+    """Every configuration, filtered. Records include the script."""
     rows = source.all_rows()
     needle = (search or "").lower().strip()
 
@@ -91,7 +59,6 @@ def list_configurations(source, platform=None, category=None, search=None,
 
 
 def _public_row(row: dict) -> dict:
-    """A catalog row as a caller should see it: no object_key, attachments named not keyed."""
     return {
         "id": row.get("id"),
         "name": row["name"],
@@ -102,11 +69,7 @@ def _public_row(row: dict) -> dict:
         "run_as": row.get("run_as") or "root",
         "depends_on": row.get("depends_on") or [],
         "script": row.get("script") or "",
-        # Vars this step's script reads but nothing supplies. Derived from the script body
-        # (the catalog has no such column) — see catalog/vars.py. A non-empty list means a
-        # bare-name request cannot plant it; tezcatlipoca fills identity vars itself and
-        # lints the rest at bundle build.
-        "required_vars": required_vars_for_row(row),
+        "required_vars": row.get("required_vars") or [],
         "attachments": [
             {"original_name": a.get("original_name"), "size_bytes": a.get("size_bytes")}
             for a in (row.get("attachments") or [])
@@ -115,9 +78,7 @@ def _public_row(row: dict) -> dict:
 
 
 def _resolution_summary(steps: list, index: dict) -> dict:
-    """What a resolved step list actually amounts to, for a caller deciding if it's sane."""
     configs = [s["name"] for s in steps if s["kind"] == "config"]
-    packages = [s["package"] for s in steps if s["kind"] == "package"]
     services = [n for n in configs if (index.get(n) or {}).get("category") == "service"]
 
     seen_attachments = {}
@@ -130,7 +91,6 @@ def _resolution_summary(steps: list, index: dict) -> dict:
     return {
         "steps": len(steps),
         "configurations": configs,
-        "packages": packages,
         "services": services,
         "attachment_bytes": sum(seen_attachments.values()),
     }
@@ -158,11 +118,7 @@ def describe(source, names: list, platform: str = "linux") -> list:
 
 
 def _platform_problems(row: dict, platform: str) -> list:
-    """Same rules as resolve._check_platform, but collected instead of raised.
-
-    check() reports everything wrong with a selection in one pass; raising on the first problem
-    would make an agent fix them one round trip at a time.
-    """
+    """Same rules as resolve._check_platform, collected instead of raised."""
     problems = []
     allowed = _TYPES_FOR_PLATFORM.get(platform)
     if allowed is None:
@@ -187,11 +143,7 @@ def _platform_problems(row: dict, platform: str) -> list:
 
 
 def check_selection(source, boxes: list) -> dict:
-    """Vet one or more boxes' selections.
-
-    `boxes` is a list of {"name": str, "platform": str, "configurations": [...]}, which is the
-    shape both config.json machines and box_vulns.json entries reduce to.
-    """
+    """Vet boxes shaped {"name", "platform", "configurations"}."""
     index = _index(source)
     report = {"ok": True, "errors": 0, "warnings": 0, "boxes": []}
 
@@ -221,47 +173,41 @@ def check_selection(source, boxes: list) -> dict:
 
             if name in EXCLUDED_NAMES:
                 add(ERROR, "building-block",
-                    "is a reusable building block meant to be pulled in through another "
-                    "configuration's depends_on; requesting it directly plants a no-op",
+                    "is a building block; requesting it directly plants a no-op",
                     name)
                 continue
 
             row = index.get(name)
             if row is None:
                 add(ERROR, "unknown-name",
-                    "matches no configuration, so it would be treated as a raw package name "
-                    "and silently installed with apt/dnf instead of planting anything",
+                    "matches no configuration in the catalog",
                     name)
                 continue
 
             for level, code, message in _platform_problems(row, platform):
                 add(level, code, message, name)
 
-            # A var the script reads but the request does not supply aborts the plant (bash
-            # `${VAR:?}` exits rc=2 immediately). The catalog has no required-vars column, so
-            # this is derived from the script body — the same rule the deploy-time bundle lint
-            # applies. Fail it here, before a bundle is built or a box touched.
-            required = required_vars_for_row(row)
-            missing = unsatisfied_required_vars(row, provided)
+            # Unsupplied vars abort the plant (`${VAR:?}` exits rc=2). The catalog declares
+            # them per row in `required_vars` (curated via `vulndb-cli update
+            # --required-vars`); nakon only reads what the row says.
+            required = row.get("required_vars") or []
+            missing = [var for var in required if var not in provided]
             if missing:
                 fix = {"name": name, "vars": {var: "<value>" for var in missing}}
                 where = ("a bare name supplies no vars" if isinstance(item, str)
                          else "the pinned \"vars\" object does not cover them")
                 add(ERROR, "missing-vars",
                     f"requires var(s) {', '.join(missing)} ({where}), so the plant would fail "
-                    f"mid-deploy. Pin it as {json.dumps(fix)} in box_vulns.json/"
-                    f"box_services.json, or drop it.",
+                    f"mid-deploy. Pin it as {json.dumps(fix)}, or drop it.",
                     name, missing=missing, required_vars=required)
 
             if not (row.get("script") or "").strip() and not (row.get("depends_on") or []):
                 add(WARNING, "no-op",
-                    "has an empty script and no dependencies, so it builds into a step that "
-                    "does nothing", name)
+                    "has an empty script and no dependencies", name)
 
             if not (row.get("description") or "").strip():
                 add(WARNING, "no-description",
-                    "has no description, so anything choosing a set has only the slug and the "
-                    "script to go on", name)
+                    "has no description", name)
 
         summary = None
         if not any(p["level"] == ERROR for p in problems):
@@ -295,7 +241,6 @@ def check_selection(source, boxes: list) -> dict:
 
 
 def boxes_from_config(config_path) -> list:
-    """Machines in a nakon config.json, as check_selection boxes."""
     from ..machines import load_machines
 
     return [
@@ -304,17 +249,10 @@ def boxes_from_config(config_path) -> list:
     ]
 
 
-def boxes_from_pins(vulns_path, services_path=None, platform="linux",
+def boxes_from_pin_files(vulns_path, services_path=None, platform="linux",
                     platforms: Optional[dict] = None) -> list:
-    """tezcatlipoca's box_vulns.json (+ optional box_services.json), as check_selection boxes.
-
-    Both files are {box_name: [configuration_name, ...]} keyed by box *type*, not per team.
-    Services are checked alongside vulns because the two are concatenated into one request when
-    the competition is generated, and a conflict only shows up in the combined list.
-
-    `platforms` optionally maps box name -> "linux"|"windows", overriding `platform` per box
-    (mixed-platform competitions otherwise need one check run per platform).
-    """
+    """Pin files as check_selection boxes: JSON objects mapping box name to
+    a list of configuration names; an explicit {box: platform} map overrides `platform`."""
     def _read(path):
         if path is None:
             return {}
@@ -339,19 +277,14 @@ def boxes_from_pins(vulns_path, services_path=None, platform="linux",
     return boxes
 
 
-def platforms_from_boxes_json(boxes_path) -> dict:
-    """{box_name: platform} from tezcatlipoca's boxes.json, by template name.
-
-    Mirrors tezcatlipoca's own rule (is_windows_template): a template whose name contains
-    "win" (case-insensitive) is a Windows box; everything else is linux.
-    """
+def load_platforms(path) -> dict:
+    """{box_name: platform} from a JSON object file."""
     try:
-        boxes = json.loads(Path(boxes_path).read_text())
+        data = json.loads(Path(path).read_text())
     except FileNotFoundError as exc:
-        raise NakonError(f"no such file: {boxes_path}") from exc
+        raise NakonError(f"no such file: {path}") from exc
     except json.JSONDecodeError as exc:
-        raise NakonError(f"{boxes_path} is not valid JSON: {exc}") from exc
-    return {
-        b["name"]: ("windows" if "win" in str(b.get("template", "")).lower() else "linux")
-        for b in boxes
-    }
+        raise NakonError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise NakonError(f"{path} must be a JSON object mapping box name to platform")
+    return {str(name): str(platform) for name, platform in data.items()}

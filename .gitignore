@@ -7,12 +7,5 @@ __pycache__
 # each box. Archive one with `nakon build --export <name>.tar.gz` instead of committing it.
 bundles/
 
-# Bundle exports and one-off operational patch scripts at the repo root are not part of the library.
+# Bundle exports
 *.tar.gz
-/fix-*.py
-
-# Local-only bring-up/verification log — contains real credentials; never commit.
-PROGRESS.md
-
-# Local agent/IDE config.
-.claude/

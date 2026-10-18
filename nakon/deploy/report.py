@@ -1,10 +1,4 @@
-"""Parse the ##nakon marker stream and report.tsv into a per-step result model.
-
-Two sources for the same information, on purpose. report.tsv is authoritative and is pulled
-back after the run, but if the channel dies mid-deploy there is no file to pull — so the live
-marker stream is parsed as it arrives and used as a fallback. Either way the operator gets a
-per-configuration failure list, the same thing the old deploy.py printed.
-"""
+"""Parse the marker stream and report.tsv into per-step results."""
 
 from ..gen import MARKER_BEGIN, MARKER_DONE, MARKER_RC
 
@@ -29,8 +23,6 @@ class StepResult:
 
 
 class RunProgress:
-    """Consumes output lines, tracking which step is running and how each finished."""
-
     def __init__(self, total: int = 0):
         self.total = total
         self.steps = {}
@@ -39,11 +31,10 @@ class RunProgress:
         self.done = False
 
     def feed(self, line: str) -> bool:
-        """Absorb one output line. Returns True if it was a nakon marker (not real output)."""
+        """Absorb one line. True if it was a marker, not real output."""
         stripped = line.strip()
 
         if stripped.startswith(MARKER_BEGIN):
-            # ##nakon begin <idx> <kind> <name>
             parts = stripped[len(MARKER_BEGIN):].strip().split(None, 2)
             if len(parts) >= 3:
                 index, kind, name = parts[0], parts[1], parts[2]
@@ -54,9 +45,6 @@ class RunProgress:
             return True
 
         if stripped.startswith(MARKER_RC):
-            # ##nakon rc <idx>\t<rc>\t<secs> — tab-delimited, matching report.tsv, so an
-            # unexpectedly empty field is preserved as its own token instead of collapsing
-            # into a neighboring one the way plain whitespace-splitting would.
             parts = stripped[len(MARKER_RC):].strip().split("\t")
             if len(parts) >= 2:
                 index = parts[0]
@@ -76,7 +64,6 @@ class RunProgress:
         return False
 
     def merge_report(self, text: str) -> None:
-        """Overlay the authoritative report.tsv on top of what the stream showed."""
         for line in text.splitlines():
             fields = line.rstrip("\n").split("\t")
             if len(fields) < 4:

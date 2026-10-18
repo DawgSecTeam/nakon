@@ -28,7 +28,7 @@ they do **not** import nakon internals. The catalog itself lives in **vulndb-ui*
 
 ```
 nakon/
-  __init__.py        public API (lazy) + __version__ (single source of truth)
+  __init__.py        __version__ (single source of truth)
   __main__.py        `python3 -m nakon` entry
   cli.py             argparse CLI — all subcommands
   errors.py          NakonError hierarchy
@@ -39,10 +39,9 @@ nakon/
     fetch.py         pull attachment bytes from vulndb-ui/MinIO
     tarball.py       export a bundle to .tar.gz
   catalog/           read + vet the catalog (build side, except where noted)
-    source.py        MySQLCatalog, HttpCatalog, DictCatalog (test double)
+    source.py        MySQLCatalog, HttpCatalog
     query.py         list / describe / check_selection; open_source()
-    randomize.py     pick_configurations() selection algorithm + interactive main()
-                     (re-exports os_to_platform from machines.py for existing callers)
+    randomize.py     pick_configurations() selection algorithm
     resolve.py       expand depends_on into ordered steps
   deploy/            DEPLOY side — needs paramiko ONLY (never imports build/catalog)
     bundle.py        load + index a saved bundle
@@ -77,8 +76,8 @@ python3 -m nakon catalog list --json
 ```
 
 There is **no automated test suite**. Verify changes by exercising the CLI against a reachable
-vulndb (or a `DictCatalog` fixture in an ad-hoc script — see `catalog/source.py`). When you
-change the selection algorithm or build output, sanity-check with `catalog check` and `build --json`.
+vulndb (or a small ad-hoc source object with `fetch()`/`all_rows()` in a throwaway script). When
+you change the selection algorithm or build output, sanity-check with `catalog check` and `build --json`.
 
 ## Conventions & gotchas
 
@@ -90,6 +89,12 @@ change the selection algorithm or build output, sanity-check with `catalog check
 - **Building blocks** (`install-package`, `create-user`, `enable-service`) are meant to be
   pulled in via `depends_on`, never selected directly — they plant a no-op. `EXCLUDED_NAMES`
   in `catalog/randomize.py` is the canonical list.
+- **`required_vars` is catalog data now, not a derivation.** Each configuration row declares
+  the shell variables its script needs from the request — curated via
+  `vulndb-cli update <name> --required-vars "VAR1,VAR2"` (empty clears it). nakon only reads
+  the column (`catalog list/show --json`, `check`'s `missing-vars` gate); it never scans
+  script bodies. tezcatlipoca gates on this via `catalog list --json` with its own curated
+  `REQUIRED_VARS` table as the fail-open floor.
 - **`build` always uses MySQL**, never the HTTP API: the HTTP API omits attachments'
   `object_key`, which the source fingerprint hashes. `catalog` commands may use HTTP (no DB
   credentials needed) — that's the agent-friendly read path.
@@ -106,7 +111,7 @@ Invoke as a subprocess; do not import internals.
 ```bash
 # Build a bundle (run where the vulndb is reachable; cwd must let nakon read its .env)
 python3 -m nakon build --config <abs-path>/config.json --out bundles --json
-# last stdout line = {"bundle_id","path","cached":bool,"plans","machines"}
+# last stdout line = {"bundle_id","path","plans","machines"}
 
 # Deploy (run where the boxes are reachable)
 python3 -m nakon deploy --bundle bundles/<id> --config <abs-path>/config.json --json
@@ -136,7 +141,7 @@ nakon catalog list --json   →  read what exists (read the script, not just the
         ↓
 (you decide)                →  pick a set per box, keyed by box TYPE (not per team)
         ↓
-nakon catalog check --box-vulns … --json   →  have nakon vet the selection
+nakon catalog check --pins … --json   →  have nakon vet the selection
         ↓
 competitions/<id>/box_vulns.json  (+ box_services.json)   →  write the answer where deploy reads it
 ```
@@ -146,9 +151,9 @@ technique; watch what a misconfiguration drags in (`unauthorized-ftp-server` ins
 respect the box's scored services; scale difficulty by mix, not just count. `splunk` and
 `roundcube` are slow (large installs) — fine to choose deliberately, excluded from random picks.
 
-`check` catches what nothing else does — most importantly the **typo**: an unknown name is not
-an error anywhere else (`resolve` treats it as a raw package and `apt-get install`s it, planting
-nothing). Error codes: `unknown-name`, `building-block`, `platform-mismatch`/`type-mismatch`,
+`check` is the pre-flight vet — most importantly the **typo**: an unknown name fails `build`
+with `UnknownConfigurationError`, but `check` names it before anything is built, and it is the
+only place platform, type, cycle and missing-vars problems are reported as structured codes. Error codes: `unknown-name`, `building-block`, `platform-mismatch`/`type-mismatch`,
 `unresolvable` (cycles, and `vars` keys that aren't shell identifiers — `resolve` rejects
 `[^A-Za-z0-9_]` names so they can't be sourced as code on the box). Warning codes: `no-op`,
 `duplicate`, `implicit-services`, `no-description`.
@@ -156,6 +161,10 @@ nothing). Error codes: `unknown-name`, `building-block`, `platform-mismatch`/`ty
 Both pin files are keyed by box type; every team must defend the identical set so the scoring
 engine's wildcard-IP checks work. Either file alone pins a competition; if neither exists the
 driver randomises and writes both, so a re-run reproduces it.
+
+The pin files are plain `{box type: [names]}` JSON objects — pass them to `catalog check
+--pins` as-is; build `--platforms` from the competition's box list (a template containing
+`win` means windows), since nakon no longer derives platforms from box files.
 
 A configuration with no description is one nothing can reason about. If you work out what one
 does, write it down with `vulndb-cli describe <name> "<prose>" --yes`.

@@ -4,7 +4,91 @@ All notable changes to nakon are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.8] — 2026-10-17
+
+### Removed
+- **The bundle cache and `--rebuild`.** `find_cached` keyed a scan of existing bundle dirs on
+  `source_fingerprint`; builds now always run fresh (content-addressed, so rebuilding the same
+  input rewrites the same directory — attachment downloads stay cached under `bundles/.cache`).
+  The cache existed to serve a build/deploy split where a bundle was built once and deployed
+  later against a possibly-drifted config; the new config-digest check (below) makes that split
+  detectable, and every consumer builds at deploy time from the file it deploys. The build JSON
+  summary drops `cached` — it is now `{bundle_id, path, plans, machines}`.
+- **The package fallback.** An unknown configuration name (top-level or in `depends_on`)
+  used to become a silent package-install step (`apt-get install` / `winget`); it now fails
+  the build with `UnknownConfigurationError`, and `catalog check` reports it as `unknown-name`.
+  To install a package, depend on the `install-package` building block with vars:
+  `{"name": "install-package", "vars": {"PACKAGE": "<name>"}}`. `SCHEMA` bumped 3 → 4, so
+  bundles built before this change are rejected — rebuild them with `nakon build`.
+- **The interactive `randomize` wizard.** Bare `nakon randomize` used to prompt for a VM count
+  and difficulty, read machines from a terraform `agent_context` output (hardcoding one
+  project's directory and team addressing scheme), and write `config.json`. `randomize` is now
+  headless-only: `--services` and `--vulns` are required.
+- **`DictCatalog`** (in-memory catalog test double) and the **`all_names()`** methods on the
+  three catalog sources — nothing in the repo or its consumers called them.
+- **The top-level lazy import API** (`from nakon import build, deploy, summarize, Bundle,
+  load_machines`). The CLI is the integration surface; direct module imports (e.g.
+  `from nakon.deploy import runner`) still work.
+- **The `required_vars` scanner.** The catalog declares each row's required vars in a new
+  `required_vars` column (added to vulndb-ui's schema this release), curated via
+  `vulndb-cli update <name> --required-vars "VAR1,VAR2"`, backfilled once via
+  `vulndb-cli backfill-required-vars`. nakon only reads the column — `catalog list` /
+  `catalog show --json` and `check`'s `missing-vars` gate now trust it as-is. This removes
+  the whole `catalog/vars.py` scanner (its `_SHELL_VAR_WHITELIST`, guard and assignment
+  regexes) from nakon: derivation lived in the wrong layer, every reader re-derived it, and
+  a curation fix could not stick.
+- Dead parameters and branches: `bootstrap_command(use_sudo=…)`, `ssh.connect(timeout=…)`,
+  `AttachmentFetcher(base_url=…)`, and the unused `os_to_platform` re-export in
+  `build/builder.py`.
+- **`--difficulty` on `randomize`.** The difficulty→count curve (services = ⌈d/3⌉, vulns = d)
+  is event policy and belongs to the caller, which already computes the budgets; `randomize`
+  now takes explicit `--services`/`--vulns` only.
+
+### Added
+- **`config_digest` in the manifest, verified at deploy.** The manifest records a SHA-256 over
+  the machine list the bundle was built from (name, platform, ordered normalized
+  configurations — address and credential fields excluded, since those are reconciled per
+  deploy). `nakon deploy` recomputes the digest from the config it is handed and fails before
+  anything is touched if it differs: request_key routing alone could silently plant a valid
+  plan on a renamed/re-listed machine (boxbuilder hit this once and hand-guarded it). The
+  check runs on the whole machine list before `--only` filtering, so subset deploys via
+  `--only` stay legal. Hashing a machine-list shape change bumps `SCHEMA`, which re-keys
+  request keys, plan ids and bundle ids at once.
+- **The interactive `randomize` wizard.** Bare `nakon randomize` used to prompt for a VM count
+  and difficulty, read machines from a terraform `agent_context` output (hardcoding one
+  project's directory and team addressing scheme), and write `config.json`. `randomize` is now
+  headless-only: `--services` and `--vulns` are required.
+- **`DictCatalog`** (in-memory catalog test double) and the **`all_names()`** methods on the
+  three catalog sources — nothing in the repo or its consumers called them.
+- **The top-level lazy import API** (`from nakon import build, deploy, summarize, Bundle,
+  load_machines`). The CLI is the integration surface; direct module imports (e.g.
+  `from nakon.deploy import runner`) still work.
+- **The `required_vars` scanner.** The catalog declares each row's required vars in a new
+  `required_vars` column (added to vulndb-ui's schema this release), curated via
+  `vulndb-cli update <name> --required-vars "VAR1,VAR2"`, backfilled once via
+  `vulndb-cli backfill-required-vars`. nakon only reads the column — `catalog list` /
+  `catalog show --json` and `check`'s `missing-vars` gate now trust it as-is. This removes
+  the whole `catalog/vars.py` scanner (its `_SHELL_VAR_WHITELIST`, guard and assignment
+  regexes) from nakon: derivation lived in the wrong layer, every reader re-derived it, and
+  a curation fix could not stick.
+- Dead parameters and branches: `bootstrap_command(use_sudo=…)`, `ssh.connect(timeout=…)`,
+  `AttachmentFetcher(base_url=…)`, and the unused `os_to_platform` re-export in
+  `build/builder.py`.
+- **`--difficulty` on `randomize`.** The difficulty→count curve (services = ⌈d/3⌉, vulns = d)
+  is event policy and belongs to the caller, which already computes the budgets; `randomize`
+  now takes explicit `--services`/`--vulns` only.
+
+### Changed
+- **A catalog missing the new `required_vars` column fails fast.** MySQL reads error with
+  `Unknown column 'required_vars'` instead of quietly reporting no required vars — upgrade the
+  vulndb (add the column, restart vulndb-ui with the matching server.js) before upgrading nakon.
+- **`catalog check`'s pin-file flags are format-agnostic now.** `--pins VULNS_JSON
+  [SERVICES_JSON]` (JSON object(s) mapping box name to a list of configuration names) and
+  `--platforms MAP_JSON` (JSON object mapping box name to `linux`/`windows`) replace
+  `--box-vulns`/`--box-services`/`--boxes-json`; the platform-sniffing from box template names
+  is gone, so per-box platforms are explicit data.
+- `catalog check` help and the `missing-vars` message no longer name a consumer's pin-file
+  format.
 
 ### Fixed
 - **A 0-step plan was failed as a credential problem.** A machine whose `configurations` list is
@@ -15,10 +99,13 @@ All notable changes to nakon are documented here. The format is based on
   `{"name","vars"}`) request of a configuration whose script reads a variable the request never
   supplies now fails with error code `missing-vars`, naming the vars and the exact JSON to pin; it
   previously reported the selection clean and the plant then failed mid-deploy (rc=2). Every
-  `catalog list` / `catalog show --json` row now carries `required_vars`, derived from the script
-  body because the catalog has no such column — with the same rules as tezcatlipoca's deploy-time
-  bundle lint (`nakon_ops._lint_bundle_vars`); keep the two in sync. PowerShell rows are
-  deliberately not derived, matching that lint.
+  `catalog list` / `catalog show --json` row carries `required_vars`, read from the catalog's
+  declared column. (In this release the column was backfilled in one pass: scanner-derived
+  proposals vetted script-by-script across all 329 rows — 38 rows carry real requirements; the
+  veto decisions and one scanner miss, `mysql-db-user`'s `DB_PASS`, are captured in the data.
+  PowerShell rows carry an empty column, matching the old lint's deliberate skip.)
+  tezcatlipoca's deploy-time bundle lint (`nakon_ops._lint_bundle_vars`) stays the last line of
+  defense for bundles that predate the column.
 - **The Windows package step reported its rc through `Process.ExitCode` alone.** It now writes
   `.nakon-step-rc` — the value `Nakon-Step` trusts over the process exit code — on every path,
   like the other Windows steps.

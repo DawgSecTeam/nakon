@@ -1,10 +1,7 @@
-"""Per-machine deploy orchestration: push a plan, run it, collect what happened.
+"""Per-machine deploy orchestration.
 
-Failure policy is inherited from the old deploy.py on purpose: a configuration exiting
-non-zero is reported, not fatal — a benign script returning 1 shouldn't abandon a box
-mid-competition — and one machine failing entirely (bad credentials, host down) never stops
-the others. `--strict` / NAKON_STRICT=1 turns any recorded failure into a non-zero exit for
-an orchestrator that wants to abort.
+A failing configuration is reported, not fatal; one bad machine never stops
+the others. `--strict` turns any failure into a non-zero exit.
 """
 
 import os
@@ -36,7 +33,6 @@ class MachineOutcome:
         return self.machine["name"]
 
     def failures(self):
-        """(ip, step_name, reason) tuples, matching what deploy.py used to report."""
         if self.error is not None:
             return [(self.machine["ip"], "(machine)", self.error)]
         out = [
@@ -51,7 +47,7 @@ class MachineOutcome:
 
 
 def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print) -> MachineOutcome:
-    """Deploy one machine's plan. Never raises for a remote failure — records it instead."""
+    """Deploy one machine's plan. Remote failures are recorded, not raised."""
     outcome = MachineOutcome(machine)
     prefix = f"[{machine['name']}]"
     platform = machine["platform"]
@@ -63,11 +59,6 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
     client = None
     paths = None
     completed = False
-    # Filled in by on_line as the bootstrap announces its unpacked plan directory. It lives out
-    # here, not inside the try, so the finally-block can still remove that directory when the
-    # channel dies or the run is interrupted. It used to be read only after run_streaming
-    # returned normally, so Ctrl-C (or a dropped connection) left the plan — the answer key —
-    # under /root: force_cleanup was called with plan_dir=None and only removed the archive.
     state = {"in_report": False, "report": [], "plan_dir": None}
 
     try:
@@ -102,7 +93,7 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
         finally:
             os.unlink(local_bootstrap)
 
-        # Report framing: everything between the markers is raw report.tsv, not output.
+        # Report framing: everything between the markers is report.tsv, not output.
         def on_line(text):
             outcome.log_lines.append(text)
             stripped = text.strip()
@@ -122,7 +113,7 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
 
             if outcome.progress.feed(text):
                 if stripped.startswith(MARKER_DONE):
-                    return  # end-of-plan marker: nothing new to say (used to re-print the last step)
+                    return
                 current = outcome.progress.current
                 if current is not None:
                     line(f"step {current.index}/{step_count} {current.kind}: {current.name}")
@@ -154,8 +145,6 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
         if state["report"]:
             outcome.progress.merge_report("\n".join(state["report"]))
         elif step_count and not outcome.progress.results():
-            # A zero-step plan legitimately exits 0 with no report and no results; only a plan
-            # that HAD steps and never reported points at credentials/sudo.
             hint = (
                 "the SSH user must be a local administrator (run.ps1 exits 78 otherwise)"
                 if platform == "windows"
@@ -174,16 +163,11 @@ def deploy_machine(bundle, machine, keep_remote=False, log_dir=None, emit=print)
 
     finally:
         if client is not None:
-            # The bootstrap removes its own artifacts on a clean exit; this covers the case
-            # where the channel died first and the plan would be left on the box.
             if not completed and not keep_remote and paths is not None:
                 ssh.force_cleanup(client, platform, paths, machine.get("password"), state["plan_dir"])
             client.close()
 
     if log_dir is not None and outcome.log_lines:
-        # Outside the try above on purpose (the log should include the FAILED line), but a
-        # log-writing problem must not escape: under --jobs it would surface from
-        # future.result() as a traceback and abort every other machine's deploy.
         try:
             _write_logs(Path(log_dir), outcome)
         except OSError as exc:
@@ -206,15 +190,13 @@ def _write_logs(log_dir: Path, outcome: MachineOutcome) -> None:
 
 
 def deploy(bundle, machines, keep_remote=False, jobs=1, log_dir=None, emit=print) -> list:
-    """Deploy every machine. Returns the list of MachineOutcomes, in input order."""
     if jobs <= 1:
         return [
             deploy_machine(bundle, machine, keep_remote, log_dir, emit)
             for machine in machines
         ]
 
-    # Per-machine work is atomic now, so parallelism is just a thread pool. Output stays
-    # readable because every line carries its machine's prefix and printing is locked.
+    # Output stays readable because every line carries its machine prefix under a lock.
     pool = ThreadPoolExecutor(max_workers=jobs)
     futures = []
     try:
@@ -224,10 +206,6 @@ def deploy(bundle, machines, keep_remote=False, jobs=1, log_dir=None, emit=print
         ]
         return [future.result() for future in futures]
     except KeyboardInterrupt:
-        # Machines that haven't started are cancelled. Ones already mid-run are NOT abandoned:
-        # each holds a plan directory on its box (the answer key) that only its own
-        # deploy_machine finally-block removes, so let them unwind and clean up. A second
-        # Ctrl-C stops waiting.
         queued = sum(1 for future in futures if future.cancel())
         running = sum(1 for future in futures if future.running())
         emit(f"[nakon] interrupted: {queued} queued machine(s) cancelled; waiting for "
@@ -239,12 +217,6 @@ def deploy(bundle, machines, keep_remote=False, jobs=1, log_dir=None, emit=print
 
 
 def outcomes_to_dict(bundle, outcomes: list, log_dir=None) -> dict:
-    """Serialize a deploy run for an orchestrator.
-
-    Per-step results were only ever written to the run's .tsv on disk, so anything driving nakon
-    had to locate and parse those files (or scrape the human summary) to find out what happened.
-    This is the same information as one document.
-    """
     machines = []
     for outcome in outcomes:
         machines.append({
@@ -280,7 +252,6 @@ def outcomes_to_dict(bundle, outcomes: list, log_dir=None) -> dict:
 
 
 def summarize(outcomes: list, emit=print) -> list:
-    """Print the end-of-run summary and return the flat failure list."""
     failures = []
     for outcome in outcomes:
         failures.extend(outcome.failures())

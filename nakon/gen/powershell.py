@@ -1,75 +1,32 @@
 """Generate the Windows side of a plan: run.ps1 and per-step .ps1 scripts.
 
-The old deploy.py ran `sudo -S powershell -File /tmp/cmd.sh` for windows configurations,
-which is nonsense on Windows — there is no sudo, and elevation cannot be obtained by feeding
-a password to stdin. Elevation here comes from the SSH principal: run.ps1 refuses to do
-anything unless it is already running elevated, and says so clearly.
-
-Each step is a separate `powershell.exe` process, for the same isolation reasons as the bash
-generator, plus one Windows-specific one: `$LASTEXITCODE` is not set by cmdlet-only scripts
-(`Set-NetFirewallProfile -Enabled False` returns nothing at all), so nakon computes and
-self-reports a real exit code per step rather than trusting either one — see Nakon-Step and
-render_step_ps1 below for exactly what that took to get right over a real SSH exec channel.
-
-Tested end-to-end against a real Windows box (Windows 10, cloned from the team's Proxmox
-`windows-workshop-template`) — see PROGRESS.md for the bring-up notes and the bugs that first
-pass found: `Start-Process -NoNewWindow`'s console-sharing hangs indefinitely when the parent
-itself has no console (exactly nakon's own SSH exec transport), and even once processes
-launch reliably, non-terminating cmdlet errors (the majority of real catalog-script failures)
-don't make powershell.exe exit non-zero on their own.
+Elevation comes from the SSH principal: run.ps1 requires an already-elevated user.
+Each step runs as its own process, which also computes a real exit code since
+cmdlet-only scripts never set $LASTEXITCODE.
 """
 
 from . import MARKER_BEGIN, MARKER_DONE, MARKER_RC, step_basename, step_label
 
 DEFAULT_STEP_TIMEOUT = 1800
 
-# Relative to each step's own working directory (the process's CWD, via -WorkingDirectory),
-# so the step script can write it with a bare filename regardless of where the plan landed.
+# Step exit code file, relative to the step's working directory (the process CWD).
 STEP_RC_FILE = ".nakon-step-rc"
 
 
 def ps_quote(value) -> str:
-    """Single-quoted PowerShell literal; ' is escaped by doubling. No expansion inside."""
     return "'" + str(value).replace("'", "''") + "'"
 
 
 def render_step_ps1(script: str, var_values: dict) -> str:
-    """A step's script with its vars prepended and an explicit exit code appended.
-
-    PowerShell has no clean way to source a vars file into a `-File` child's scope, so the
-    assignments are baked into a copy of the script at build time. The original body is
-    preserved verbatim below them.
-
-    Most catalog scripts are cmdlet-only and never set $LASTEXITCODE — and critically, a
-    *non-terminating* cmdlet error (parameter binding failures, "command not found", most of
-    what catalog scripts actually hit) does not make powershell.exe exit non-zero on its own;
-    the process happily exits 0 having merely written to its error stream. Left alone, that
-    means a script that fails every cmdlet it calls is still reported as a success. The
-    trailer below computes a real exit code: an external command's $LASTEXITCODE wins if the
-    script set one, otherwise any error recorded in this process's $Error collection (cleared
-    first, so only this script's errors count) means failure.
-
-    That code is both `exit`ed *and* written to a file in the step's own working directory
-    (a bare relative filename — -WorkingDirectory makes that directory the process's CWD).
-    The file is the value Nakon-Step actually trusts: `Process.ExitCode` after
-    `Start-Process -PassThru` is genuinely unreliable for short-lived, quiet processes (a
-    known .NET/PowerShell gotcha — confirmed against a real Windows box, where every step that
-    produced no console output came back with an empty exit code even with the process
-    handle pre-touched, while the one step that happened to print errors did not), so the
-    real process exit code is a fallback for the case the file never gets written at all —
-    the process crashed, or was killed for exceeding the step timeout — not the primary path.
-    """
-    # Plain \n throughout, like render_run_ps1: build/_write_plan writes every Windows file with
-    # newline="\r\n", which translates each \n on the way out. Emitting \r\n here as well used to
-    # produce \r\r\n on every nakon-added line (PowerShell tolerated it, but the file on disk no
-    # longer matched the body that was hashed into blobs/).
+    """Step script with vars prepended and an explicit exit code appended."""
+    # Plain \n throughout: build writes Windows files with newline="\r\n".
     header = "".join(
         f"${key} = {ps_quote(value)}\n" for key, value in sorted(var_values.items())
     )
     if header:
         header = f"# nakon: variables for this step\n{header}\n"
     trailer = (
-        "\n# nakon: compute a real exit code — see render_step_ps1 docstring.\n"
+        "\n# nakon: real exit code from $LASTEXITCODE or $Error.\n"
         "if ($LASTEXITCODE) { $__nakon_rc = $LASTEXITCODE }\n"
         "elseif ($Error.Count -gt 0) { $__nakon_rc = 1 }\n"
         "else { $__nakon_rc = 0 }\n"
@@ -80,56 +37,13 @@ def render_step_ps1(script: str, var_values: dict) -> str:
     return f"{header}$Error.Clear()\n{script}\n{trailer}"
 
 
-def render_package_step(package: str) -> str:
-    """Package fallback on Windows: winget, then chocolatey.
-
-    NOT verified on a real Windows box: unlike the rest of the Windows deploy path (transport,
-    elevation, step reporting, catalog scripts), this branch has never been exercised against a
-    live winget or chocolatey install — every Windows config tested so far used a built-in
-    cmdlet (Enable-WindowsOptionalFeature, Install-WindowsFeature, Install-ADDSForest, …). It is
-    reached when a requested name matches no configuration (a typo, or a deliberately raw
-    package), so it carries a package name and no URL — hence no direct-MSI preference. The
-    first live Windows use should confirm the package actually landed.
-    """
-    return f"""# GENERATED BY nakon — package fallback: {package}
-# NOT verified against real winget/chocolatey on Windows — see render_package_step().
-$ErrorActionPreference = 'Continue'
-$pkg = {ps_quote(package)}
-$rcFile = {ps_quote(STEP_RC_FILE)}
-
-# Nakon-Step trusts this file over Process.ExitCode (see render_step_ps1); it reads it from
-# this step's workdir, which is also the process CWD. Writing it on every path makes a Windows
-# package step report a real rc like every other step.
-function Nakon-ExitRc([int]$rc) {{
-    Set-Content -LiteralPath $rcFile -Value $rc -NoNewline -ErrorAction SilentlyContinue
-    exit $rc
-}}
-
-if (Get-Command winget -ErrorAction SilentlyContinue) {{
-    winget install --exact --id $pkg --silent --accept-package-agreements --accept-source-agreements
-    # $null means the command never ran (removed mid-run, blocked by policy): a failure, not
-    # a very convincing [int]$null == 0.
-    $rc = if ($null -eq $LASTEXITCODE) {{ 1 }} else {{ $LASTEXITCODE }}
-    Nakon-ExitRc $rc
-}} elseif (Get-Command choco -ErrorAction SilentlyContinue) {{
-    choco install $pkg -y --no-progress
-    $rc = if ($null -eq $LASTEXITCODE) {{ 1 }} else {{ $LASTEXITCODE }}
-    Nakon-ExitRc $rc
-}} else {{
-    Write-Error "[nakon] no supported package manager (winget/choco) found for '$pkg'"
-    Nakon-ExitRc 1
-}}
-"""
-
-
 def _preamble(plan_id: str, bundle_id: str, total: int, version: str) -> str:
     return f"""# GENERATED BY nakon {version} — do not edit.
 #   bundle {bundle_id}
 #   plan   {plan_id}
 #   {total} step(s), platform=windows
 #
-# ErrorActionPreference is Continue, never Stop: one failing configuration must not abort
-# the rest of the box.
+# ErrorActionPreference is Continue: one failing step must not abort the rest.
 
 $ErrorActionPreference = 'Continue'
 $PlanDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -139,7 +53,7 @@ $StepTimeout = if ($env:NAKON_STEP_TIMEOUT) {{ [int]$env:NAKON_STEP_TIMEOUT }} e
 $Failed  = 0
 Set-Content -LiteralPath $Report -Value '' -NoNewline
 
-# nakon does not self-elevate on Windows. The SSH principal must already be an admin.
+# The SSH principal must already be an admin; nakon cannot elevate itself over SSH.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not ([Security.Principal.WindowsPrincipal]$identity).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {{
@@ -149,35 +63,15 @@ if (-not ([Security.Principal.WindowsPrincipal]$identity).IsInRole(
 }}
 
 function Nakon-Record($idx, $name, $kind, $rc, $secs) {{
-    # $rc must never reach the report as a blank field — an empty token between two tabs (or
-    # two spaces on the live "##nakon rc" line) silently collapses when the Python side splits
-    # on whitespace, shifting $secs into the rc column and making a real failure look "done".
-    # -1 is not a real process exit code, so it reads unambiguously as "nakon couldn't tell".
-    #
-    # $null check ONLY — confirmed against a real box that `-or $rc -eq ''` is actively wrong,
-    # not just redundant: PowerShell's -eq coerces the empty string to match the left operand's
-    # type, so when $rc is the *integer* 0 (a real, successful exit code), `$rc -eq ''`
-    # evaluates true, and every clean success was being stomped to -1 right here.
+    # Blank $rc reads as -1 ("nakon couldn't tell"); $null check only, since
+    # integer 0 -eq '' coerces true in PowerShell.
     if ($null -eq $rc) {{ $rc = -1 }}
     Add-Content -LiteralPath $script:Report -Value ("{{0}}`t{{1}}`t{{2}}`t{{3}}`t{{4}}" -f $idx, $name, $kind, $rc, $secs)
-    # Tab-delimited, matching report.tsv, on purpose: a plain-space-delimited line can't tell
-    # an empty field from a separator, so an unexpected blank here would silently shift $secs
-    # into the rc column on the Python side instead of being visibly wrong.
     Write-Output ("{MARKER_RC} {{0}}`t{{1}}`t{{2}}" -f $idx, $rc, $secs)
     if ($rc -ne 0) {{ $script:Failed++ }}
 }}
 
-# One step = one powershell.exe, launched WITHOUT -NoNewWindow. That flag shares the
-# parent's console with the child — and confirmed against a real box, when run.ps1 is itself
-# started over a non-interactive SSH exec channel (no pty, no console — exactly how nakon's
-# ssh.py invokes it), there is no console for the child to share: Start-Process -NoNewWindow
-# then hangs indefinitely, WaitForExit never returns true, and the step times out with no
-# output ever seen, regardless of what the step script actually did. Redirecting the child's
-# streams explicitly sidesteps console attachment entirely, works the same whether nakon is
-# run interactively or not, and — as a bonus — makes .ExitCode reliable too (the empty
-# .ExitCode / Start-Process -PassThru gotcha only came up in combination with -NoNewWindow).
-# ProcessStartInfo.Arguments is used instead of the newer .ArgumentList collection: the
-# latter can be a null property depending on the target's .NET Framework version.
+# One step = one process with redirected streams (no console sharing over SSH exec).
 function Nakon-Step($script, $workdir, $idx, $name, $kind) {{
     $t0 = Get-Date
     $rc = $null
@@ -197,9 +91,6 @@ function Nakon-Step($script, $workdir, $idx, $name, $kind) {{
         $psi.Arguments = ($stepArgs | ForEach-Object {{ '"' + $_.Replace('"', '\\"') + '"' }}) -join ' '
 
         $proc = [System.Diagnostics.Process]::Start($psi)
-        # Started before WaitForExit so the pipes are drained concurrently — reading only
-        # after the process exits risks a classic deadlock if a chatty step fills the OS
-        # pipe buffer before anyone reads it.
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
 
@@ -208,9 +99,6 @@ function Nakon-Step($script, $workdir, $idx, $name, $kind) {{
             try {{ $proc.Kill() }} catch {{ }}
             $rc = 124
         }} else {{
-            # Not truly live line-by-line the way console-sharing would have been, but that
-            # only ever worked over an interactive session anyway — this trades that for
-            # actually working over the SSH exec channel nakon really uses.
             if ($stdoutTask.Result) {{ Write-Output $stdoutTask.Result.TrimEnd("`r", "`n") }}
             if ($stderrTask.Result) {{ Write-Output $stderrTask.Result.TrimEnd("`r", "`n") }}
             if (Test-Path -LiteralPath $rcFile) {{
@@ -236,13 +124,12 @@ function Nakon-Step($script, $workdir, $idx, $name, $kind) {{
 
 
 def render_run_ps1(steps: list, plan_id: str, bundle_id: str, version: str) -> str:
-    """Emit the whole run.ps1 for a windows plan."""
     parts = [_preamble(plan_id, bundle_id, len(steps), version)]
 
     for index, step in enumerate(steps):
         label = step_label(step)
         idx = f"{index:03d}"
-        kind = "package" if step["kind"] == "package" else "config"
+        kind = "config"
         script = f"(Join-Path $PlanDir 'steps\\{step_basename(index, step, 'windows')}')"
         workdir = f"(Join-Path $PlanDir 'files\\{idx}')"
 
@@ -254,7 +141,7 @@ Nakon-Step {script} {workdir} '{idx}' {ps_quote(label)} '{kind}'
 
     parts.append(f"""
 Write-Output "{MARKER_DONE} failed=$Failed steps=$Total"
-# Always exit 0 — the Python side owns the pass/fail decision.
+# Always exit 0; the Python side owns the pass/fail decision.
 exit 0
 """)
     return "".join(parts)

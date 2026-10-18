@@ -1,11 +1,6 @@
-"""Fetch attachment bytes from vulndb-ui (302 -> presigned MinIO URL), with a local cache.
+"""Fetch attachment bytes from vulndb-ui, with a local cache.
 
-`requests` is imported inside the function that needs it: deploy hosts only have paramiko,
-and they import this package transitively through the CLI.
-
-The cache lives at <bundles>/.cache/attachments/ and is keyed by the attachment's object_key,
-which embeds a per-upload UUID. It is a pure download cache: nothing in any manifest ever
-references it, so it can be deleted at any time without invalidating a bundle.
+Cache lives at <bundles>/.cache/attachments/ and can be deleted at any time.
 """
 
 import os
@@ -16,21 +11,18 @@ from ..hashing import sha256_bytes, sha256_file, sha256_text
 
 
 class AttachmentFetcher:
-    def __init__(self, cache_dir: Path, base_url: str = None):
+    def __init__(self, cache_dir: Path):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.base_url = (base_url if base_url is not None else os.getenv("VULNDB_UI_URL", "")).rstrip("/")
+        self.base_url = os.getenv("VULNDB_UI_URL", "").rstrip("/")
         self.hits = 0
         self.misses = 0
 
     def _cache_path(self, attachment: dict) -> Path:
-        # object_key is stable per upload (it contains a UUID minted at upload time), so it
-        # is a sound cache key. Renaming an attachment changes original_name, not the key —
-        # which is why original_name is part of the source fingerprint instead.
         return self.cache_dir / sha256_text(attachment["object_key"])
 
     def fetch(self, attachment: dict) -> tuple:
-        """Return (local_path, sha256) for one attachment, downloading only on a cache miss."""
+        """Return (local_path, sha256), downloading only on a cache miss."""
         cached = self._cache_path(attachment)
         expected_size = attachment.get("size_bytes")
 
@@ -64,7 +56,6 @@ class AttachmentFetcher:
                 f"bundle a file that doesn't match its own metadata."
             )
 
-        # Write via a temp file so a killed build can't leave a truncated entry in the cache.
         tmp = cached.with_suffix(".partial")
         tmp.write_bytes(content)
         tmp.replace(cached)

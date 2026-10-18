@@ -1,5 +1,4 @@
-"""`python3 -m nakon` — the only entry point. No console_scripts, so the scoring engine can
-run nakon from a plain directory copy with nothing installed but paramiko."""
+"""`python3 -m nakon` entry point."""
 
 import sys
 

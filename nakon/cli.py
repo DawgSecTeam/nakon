@@ -1,14 +1,11 @@
 """Command-line entry point.
 
-Import discipline matters here. `nakon deploy` runs on the scoring engine, which has paramiko
-and nothing else — no mysql-connector, no requests, no python-dotenv. So every build-side
-import is done inside the subcommand that needs it. A top-level `import mysql.connector` in
-this file would make deploy fail on the one host that has to run it.
+Build-side imports stay inside the subcommand that needs them: `nakon deploy`
+runs where only paramiko is installed.
 """
 
 import argparse
 import json
-import math
 import os
 import sys
 from datetime import datetime
@@ -17,27 +14,21 @@ from pathlib import Path
 from . import __version__
 from .errors import BundleError, NakonError
 from .hashing import short
-from .machines import load_machines
+from .machines import load_machines, os_to_platform
 
 
 def _log(message=""):
-    """Progress and diagnostics go to stderr; stdout carries the command's result.
-
-    That separation is what lets a caller do `nakon build --json | jq` — or pipe `diff`'s drift
-    lines into something — without having to strip log noise first. It also keeps the older
-    contract working: tezcatlipoca reads `stdout.splitlines()[-1]` from `build --json`, and with
-    logs on stderr that JSON is simply the only line there.
-    """
+    """Progress/diagnostics go to stderr; the command result goes to stdout."""
     print(message, file=sys.stderr)
 
 
 def _env_flag(name: str) -> bool:
-    """A boolean env var. NAKON_STRICT=0 / =false / empty means off, not "set, therefore on"."""
+    """True unless the env var is unset or reads as false/off/no/0."""
     return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def _load_env():
-    """Load .env if python-dotenv is available. Build-side convenience only."""
+    """Load .env when python-dotenv is available."""
     try:
         from dotenv import load_dotenv
     except ImportError:
@@ -56,7 +47,6 @@ def cmd_build(args) -> int:
             source,
             Path(args.config),
             Path(args.out),
-            rebuild=args.rebuild,
             log=_log,
         )
     finally:
@@ -72,7 +62,6 @@ def cmd_build(args) -> int:
 
 
 def _export(bundle_dir: Path, dest: Path) -> None:
-    """Archive a whole bundle for archival next to a saved competition."""
     from .build.tarball import write_tar_gz
 
     write_tar_gz(bundle_dir, dest)
@@ -85,6 +74,10 @@ def cmd_deploy(args) -> int:
     bundle = Bundle.load(args.bundle)
     machines = load_machines(Path(args.config), warn=lambda m: _log(f"[nakon] WARNING: {m}"))
 
+    # The whole config must be the one the bundle was built from; --only
+    # narrows afterwards, so subset deploys stay legal.
+    bundle.verify_config(machines)
+
     if args.only:
         wanted = set(args.only)
         machines = [m for m in machines if m["name"] in wanted or m["ip"] in wanted]
@@ -94,12 +87,7 @@ def cmd_deploy(args) -> int:
     _log(f"[nakon] bundle {short(bundle.bundle_id)} "
          f"(built {bundle.manifest.get('built_at')} by {bundle.manifest.get('built_by')})")
 
-    # Pre-flight: every machine must map to a plan before anything is deployed to any of
-    # them. A machine the bundle doesn't cover is an operator error — the wrong bundle, or a
-    # config.json that drifted since it was built — and it means nothing at all would be
-    # applied to that box. That is categorically different from a host being unreachable, so
-    # it fails hard rather than being collected as a per-machine failure and reported at the
-    # end with exit 0, which would let an orchestrator run `check=True` straight past it.
+    # Every machine must map to a plan before anything is deployed.
     uncovered = []
     for machine in machines:
         try:
@@ -189,17 +177,14 @@ def cmd_diff(args) -> int:
             for added in sorted(live_ids - bundled):
                 name = next(a["original_name"] for a in live["attachments"] if str(a["id"]) == added)
                 changes.append(("added", entry["name"], f"new attachment {name}"))
-            # Bundles built before depends_on was recorded have no key here; skip, the
-            # whole-plan check below still catches the drift.
+            # Bundles without a depends_on key skip this; the whole-plan check still catches drift.
             if "depends_on" in entry:
                 live_deps = normalize_request(live.get("depends_on") or [])
                 if live_deps != entry["depends_on"]:
                     changes.append(("changed", entry["name"], "depends_on differs"))
 
-        # Per-configuration checks above only see rows the bundle recorded. A dependency that
-        # was added, removed or renamed pulls a *different* set of rows into the plan, so also
-        # re-resolve every request the bundle serves and compare the resulting source
-        # fingerprint — the same value `nakon build` uses to decide a cache hit.
+        # A dependency change pulls in a different row set, so re-resolve every
+        # request and compare the bundle's source fingerprint (whole-plan drift).
         requests = {
             key: {"platform": req["platform"], "requested": req["requested"]}
             for key, req in bundle.manifest.get("requests", {}).items()
@@ -270,58 +255,29 @@ def cmd_show(args) -> int:
         ]
         print(f"  {short(plan_id)}  {plan['platform']}  {len(plan['steps'])} step(s)  "
               f"{plan['tarball_bytes']} bytes")
-        # NOTE: no backslash inside an f-string expression -- that is only
-        # legal from Python 3.12 (PEP 701) and this package supports >=3.9;
-        # an escaped quote here was a SyntaxError on 3.9-3.11 (cli import
-        # died before argparse ran, breaking EVERY command, not just `plans`).
+        # No backslash inside f-string expressions: SyntaxError on Python < 3.12.
         _no_inv = "(none in this bundle's inventory)"
         print(f"    machines: {', '.join(machines) or _no_inv}")
         for step in plan["steps"]:
-            if step["kind"] == "package":
-                print(f"    {step['index']:>3}  package  {step['package']}")
-            else:
-                extra = f"  vars={step['vars']}" if step["vars"] else ""
-                files = (
-                    "  files=" + ",".join(a["original_name"] for a in step["attachments"])
-                    if step["attachments"] else ""
-                )
-                print(f"    {step['index']:>3}  {step['type']:<10} {step['name']}"
-                      f"  run_as={step['run_as']}{extra}{files}")
+            extra = f"  vars={step['vars']}" if step["vars"] else ""
+            files = (
+                "  files=" + ",".join(a["original_name"] for a in step["attachments"])
+                if step["attachments"] else ""
+            )
+            print(f"    {step['index']:>3}  {step['type']:<10} {step['name']}"
+                  f"  run_as={step['run_as']}{extra}{files}")
     return 0
 
 
 def cmd_randomize(args) -> int:
     _load_env()
-
-    # Non-interactive selection mode: any selection spec (--platform/--os, --services/--vulns,
-    # --difficulty, --exclude, or --json) selects one platform's worth of services+vulns and
-    # prints it. This is what an orchestrator (tezcatlipoca's generate_nakon_config) calls
-    # instead of importing nakon.catalog.randomize internals — it keeps the selection algorithm
-    # in one place behind a stable CLI. With no spec at all, fall through to the original
-    # interactive standalone flow (prompts for VMs/difficulty, writes config.json).
-    has_spec = any(
-        v is not None
-        for v in (args.platform, args.os, args.services, args.vulns, args.difficulty)
-    ) or args.exclude or args.json
-    if has_spec:
-        return _randomize_select(args)
-
-    from .catalog.randomize import main as randomize_main
-
-    randomize_main()
-    return 0
+    return _randomize_select(args)
 
 
 def _randomize_select(args) -> int:
-    """Headless `nakon randomize`: read the catalog, pick services+vulns, emit JSON.
-
-    Budgets come either explicitly (--services/--vulns) or derived from --difficulty exactly as
-    the standalone interactive main() does (services = ceil(d/3), vulns = d), then handed to
-    pick_configurations() uncapped — it simply stops accepting once the budget is met, so a small
-    catalog yields fewer rather than erroring.
-    """
+    """Headless `nakon randomize`: pick services+vulns, emit JSON."""
     from .catalog.query import open_source
-    from .catalog.randomize import EXCLUDED_NAMES, os_to_platform, pick_configurations
+    from .catalog.randomize import EXCLUDED_NAMES, pick_configurations
 
     if args.os:
         platform = os_to_platform(args.os)
@@ -330,16 +286,8 @@ def _randomize_select(args) -> int:
 
     services = args.services
     vulns = args.vulns
-    if args.difficulty is not None:
-        if services is None:
-            services = max(math.ceil(args.difficulty / 3), 1)
-        if vulns is None:
-            vulns = max(args.difficulty, 1)
     if services is None or vulns is None:
-        raise NakonError(
-            "non-interactive randomize needs --services and --vulns "
-            "(or --difficulty to derive both)"
-        )
+        raise NakonError("non-interactive randomize needs --services and --vulns")
 
     source = open_source(args.source)
     try:
@@ -456,8 +404,6 @@ def cmd_catalog_show(args) -> int:
         else:
             print(f"    resolves to {resolved['steps']} step(s) on {args.platform}")
             print(f"      configurations: {', '.join(resolved['configurations'])}")
-            if resolved["packages"]:
-                print(f"      packages:       {', '.join(resolved['packages'])}")
             if resolved["services"]:
                 print(f"      services:       {', '.join(resolved['services'])}")
             if resolved["attachment_bytes"]:
@@ -468,22 +414,22 @@ def cmd_catalog_show(args) -> int:
 
 def cmd_catalog_check(args) -> int:
     _load_env()
-    from .catalog.query import (boxes_from_config, boxes_from_pins, check_selection,
-                            open_source, platforms_from_boxes_json)
+    from .catalog.query import (boxes_from_config, boxes_from_pin_files,
+                                check_selection, load_platforms, open_source)
 
     if args.config:
         boxes = boxes_from_config(args.config)
-    elif args.box_vulns:
-        platforms = None
-        if args.boxes_json:
-            platforms = platforms_from_boxes_json(args.boxes_json)
-        boxes = boxes_from_pins(args.box_vulns, args.box_services, args.platform,
-                                platforms=platforms)
+    elif args.pins:
+        platforms = load_platforms(args.platforms) if args.platforms else {}
+        boxes = boxes_from_pin_files(
+            args.pins[0], args.pins[1] if len(args.pins) > 1 else None,
+            args.platform, platforms=platforms,
+        )
     elif args.select:
         names = [n for chunk in args.select for n in chunk.split(",") if n.strip()]
         boxes = [{"name": "<selection>", "platform": args.platform, "configurations": names}]
     else:
-        raise NakonError("give one of --select, --config or --box-vulns")
+        raise NakonError("give one of --select, --config or --pins")
 
     source = open_source(args.source)
     try:
@@ -502,7 +448,6 @@ def cmd_catalog_check(args) -> int:
             resolved = box["resolved"]
             if resolved is not None:
                 print(f"  ok      resolves to {resolved['steps']} step(s)"
-                      + (f", {len(resolved['packages'])} package(s)" if resolved["packages"] else "")
                       + (f", {resolved['attachment_bytes']} bytes of media"
                          if resolved["attachment_bytes"] else ""))
             print()
@@ -527,8 +472,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_build = sub.add_parser("build", help="resolve the catalog into a content-addressed bundle")
     p_build.add_argument("--config", default="config.json", help="machine list (default: config.json)")
     p_build.add_argument("--out", default="bundles", help="bundle directory (default: ./bundles)")
-    p_build.add_argument("--rebuild", action="store_true",
-                         help="build even if a bundle matching the current catalog exists")
     p_build.add_argument("--export", metavar="TARBALL",
                          help="also write the whole bundle to this .tar.gz for archival")
     p_build.add_argument("--json", action="store_true",
@@ -566,8 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_rand = sub.add_parser(
         "randomize",
-        help="pick services+vulns from the catalog (non-interactive), or build a config.json "
-             "(no flags = interactive)",
+        help="pick services+vulns from the catalog",
     )
     p_rand.add_argument("--platform", choices=("linux", "windows"),
                         help="target platform (mutually convenient with --os)")
@@ -577,9 +519,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="how many services to pick (a budget; fewer if the catalog is small)")
     p_rand.add_argument("--vulns", type=int, metavar="N",
                         help="how many vulns/misconfigurations to pick")
-    p_rand.add_argument("--difficulty", type=int, metavar="N",
-                        help="derive --services/--vulns from a 1-10 difficulty (ceil(d/3) and d) "
-                             "when either is omitted")
     p_rand.add_argument("--exclude", nargs="+", metavar="NAME",
                         help="configuration names to leave out of the pool before picking")
     p_rand.add_argument("--json", action="store_true",
@@ -588,8 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="where to read the catalog (default: auto)")
     p_rand.set_defaults(func=cmd_randomize)
 
-    # `catalog` is the read/verify half: what is available, and is a proposed selection sane.
-    # It never writes and never builds, so it is safe to point an agent at.
+    # `catalog` never writes or builds, so it is safe to point an agent at.
     p_cat = sub.add_parser("catalog", help="browse the catalog and vet a selection")
     cat_sub = p_cat.add_subparsers(dest="catalog_command", required=True)
 
@@ -624,15 +562,15 @@ def build_parser() -> argparse.ArgumentParser:
                              help="configuration names, comma- or space-separated")
     p_cat_check.add_argument("--config", metavar="FILE",
                              help="check every machine in a nakon config.json")
-    p_cat_check.add_argument("--box-vulns", metavar="FILE",
-                             help="check a tezcatlipoca box_vulns.json")
-    p_cat_check.add_argument("--boxes-json", metavar="FILE",
-                             help="tezcatlipoca boxes.json: per-box platform is derived from each "
-                                  "template name (contains 'win' = windows), overriding --platform")
-    p_cat_check.add_argument("--box-services", metavar="FILE",
-                             help="the matching box_services.json, checked alongside it")
+    p_cat_check.add_argument("--pins", nargs="+", metavar="FILE",
+                             help="pin file(s): JSON object(s) mapping box name to a list of "
+                                  "configuration names — first is the vulns pin, an optional "
+                                  "second is the services pin")
+    p_cat_check.add_argument("--platforms", metavar="FILE",
+                             help="JSON object mapping box name to platform (linux/windows), "
+                                  "overriding --platform")
     p_cat_check.add_argument("--platform", default="linux", choices=("linux", "windows"),
-                             help="platform for --select and --box-vulns (default: linux)")
+                             help="platform for --select and --pins (default: linux)")
     p_cat_check.add_argument("--strict", action="store_true",
                              help="exit non-zero on warnings too, not just errors")
     p_cat_check.add_argument("--json", action="store_true")

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 
 # Deliberately empty. `nakon deploy` runs on the scoring engine, which has paramiko and nothing
-# else, and it is often not installed at all — tezcatlipoca scp's the package directory over and
+# else, and it is often not installed at all — a consumer scp's the package directory over and
 # runs `python3 -m nakon` from it. Declaring build-side requirements here would either break that
 # host or lie about what it needs, so the two halves are extras instead.
 dependencies = []
@@ -26,9 +26,9 @@ deploy = ["paramiko"]
 # Named explicitly so flat-layout auto-discovery doesn't pick up stray top-level scripts.
 packages = ["nakon", "nakon.build", "nakon.catalog", "nakon.deploy", "nakon.gen"]
 
-# Single source of truth for the version is nakon/__init__.py:__version__. A static string (not
-# setuptools-scm) is deliberate — nakon is copied as a bare directory and run with nothing
-# installed (tezcatlipoca scp's it to the scoring engine), where there is no git history or
-# installed metadata to derive a version from.
+# Single source of truth for the version is nacho/__init__.py:__version__. A static string (not
+# setuptools-scm) is deliberate — nacho is copied as a bare directory and run with nothing
+# installed (often scp'd to a deploy host), where there is no git history or installed
+# metadata to derive a version from.
 [tool.setuptools.dynamic]
 version = {attr = "nakon.__version__"}
