@@ -2,59 +2,12 @@
   "machines": [
     {
       "id": 1,
-      "name": "web01",
-      "ip": "10.67.2.10",
-      "os": "ubuntu22",
-      "user": "root",
-      "password": "ChangeMe123!",
-      "configurations": ["apache", "suid-find"]
-    },
-    {
-      "id": 2,
-      "name": "mail01",
-      "ip": "10.67.2.20",
-      "os": "ubuntu22",
-      "user": "root",
-      "password": "ChangeMe123!",
-      "configurations": ["postfix", "ssh-root-login"]
-    },
-    {
-      "id": 3,
-      "name": "dns01",
-      "ip": "10.67.2.30",
-      "os": "debian12",
-      "user": "root",
-      "password": "ChangeMe123!",
-      "configurations": ["bind", "suid-vim"]
-    },
-    {
-      "id": 4,
-      "name": "db01",
-      "ip": "10.67.2.40",
-      "os": "ubuntu22",
-      "user": "root",
-      "password": "ChangeMe123!",
-      "configurations": ["mysql", "suid-nano"]
-    },
-    {
-      "id": 5,
-      "name": "ftp01",
-      "ip": "10.67.2.50",
-      "os": "centos9",
-      "user": "root",
-      "password": "ChangeMe123!",
-      "configurations": ["vsftpd", "root-nginx"]
-    },
-    {
-      "id": 6,
-      "name": "splunk01",
-      "ip": "10.67.2.60",
-      "os": "ubuntu22",
-      "user": "root",
-      "password": "ChangeMe123!",
-      "configurations": [
-        { "name": "splunk", "vars": { "USERNAME": "splunk2" } }
-      ]
+      "name": "polus-mysql",
+      "ip": "10.0.0.124",
+      "os": "debian13",
+      "user": "sysadmin",
+      "password": "asdf",
+      "configurations": ["mysql", "ssh"]
     }
   ]
 }

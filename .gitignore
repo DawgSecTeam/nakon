@@ -2,6 +2,7 @@
 venv
 config.json
 __pycache__
+testing/
 
 # Built bundles: they hold attachment media and the full list of vulnerabilities planted on
 # each box. Archive one with `nakon build --export <name>.tar.gz` instead of committing it.
